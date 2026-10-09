@@ -1,0 +1,46 @@
+# fly.toml app configuration for SignalStack Challenger Trading Agent
+app = "signalstack-challenger-agent"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  SQLITE_DB_PATH = "/data/agent.db"
+  SERVICE_NAME = "SignalStack Challenger Trading Agent"
+  ACCOUNT_NUMBER = "SS-CHALLENGER-MAIN"
+  AGENT_ROLE = "Challenger (Option A: Symmetric Dual-Hybrid)"
+  CHAMPION_URL = "https://signalstack-trading-agent.fly.dev"
+  SIGNALSTACK_WEBHOOK_URL = ""
+  SIGNALSTACK_EXIT_ACTION = "close"
+  INITIAL_CAPITAL = "100000"
+  MARGIN_MULTIPLIER = "2.0"
+  BOOTSTRAP_MODE = "true"
+  BOOTSTRAP_START_DATE = "2026-09-28"
+  MAX_ORDER_VALUE = "50000"
+  MAX_SHARES_PER_ORDER = "5000"
+  ORDER_TIMEOUT_SEC = "15"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[mounts]
+  source = "signalstack_challenger_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
