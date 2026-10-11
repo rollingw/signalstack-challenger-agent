@@ -1,4 +1,4 @@
-# Binaries for programs and plugins
+# Binaries and build artifacts
 *.exe
 *.exe~
 *.dll
@@ -6,30 +6,52 @@
 *.dylib
 bin/
 
-# Test binary, built with `go test -c`
+# Go test binaries and coverage
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
 coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories
-# vendor/
-
-# Go workspace file
+# Go workspace
 go.work
 go.work.sum
 
-# Local data & environment
-.env
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases & data files
 data/*.db*
 data/*.sqlite*
-__pycache__/
-*.pyc
-.DS_Store
+*.db
+*.sqlite
+*.sqlite3
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
