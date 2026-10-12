@@ -51,13 +51,13 @@ def run_live_test():
     log(f"PASS: Agent is healthy (broker: {h['broker']}, bootstrap: {h.get('bootstrap_mode')})", "✅")
     passed += 1
 
-    # 2. Service metadata and Model 3 branding
-    log("Test 2: Service Metadata & Model 3 Branding...", "🧪")
+    # 2. Service metadata and Model 5 branding
+    log("Test 2: Service Metadata & Model 5 Branding...", "🧪")
     r = requests.get(f"{AGENT_URL}/", timeout=10)
     assert r.status_code == 200
     meta = r.json()
     assert meta.get("service") == "SignalStack Challenger Trading Agent", f"Unexpected service: {meta.get('service')}"
-    assert meta.get("model") == "Model 3 (Symmetric Dual-Hybrid)", f"Unexpected model: {meta.get('model')}"
+    assert meta.get("model") == "Model 5 (Linear Green Hold & Symmetric Dual-Hybrid)", f"Unexpected model: {meta.get('model')}"
     assert meta.get("role") == "challenger", f"Unexpected role: {meta.get('role')}"
     assert meta.get("champion_url") == "https://signalstack-trading-agent.fly.dev"
     log(f"PASS: Service identified as {meta['service']} ({meta['model']})", "✅")
@@ -88,7 +88,7 @@ def run_live_test():
     log("Test 5: Payload Validation Check...", "🧪")
     val_r = requests.post(
         f"{AGENT_URL}/signal",
-        json={"signal_id": "bad-val", "symbol": "TNA", "action": "BUY", "shares": -5, "signal_price": 50.0},
+        json={"signal_id": f"bad-val-{int(time.time())}", "symbol": "TNA", "action": "BUY", "shares": -5, "signal_price": 50.0},
         headers=HEADERS
     )
     assert val_r.status_code == 400, f"Expected 400 Bad Request, got {val_r.status_code}"
@@ -99,7 +99,7 @@ def run_live_test():
     log("Test 6: Safety Limit Ceiling Check...", "🧪")
     safe_r = requests.post(
         f"{AGENT_URL}/signal",
-        json={"signal_id": "excess-shares", "symbol": "TNA", "action": "BUY", "shares": 100000, "signal_price": 50.0},
+        json={"signal_id": f"excess-shares-{int(time.time())}", "symbol": "TNA", "action": "BUY", "shares": 100000, "signal_price": 50.0},
         headers=HEADERS
     )
     assert safe_r.status_code == 422, f"Expected 422 Unprocessable, got {safe_r.status_code}"

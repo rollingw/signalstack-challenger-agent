@@ -34,7 +34,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"service":           s.cfg.ServiceName,
-		"model":             "Model 3 (Symmetric Dual-Hybrid)",
+		"model":             "Model 5 (Linear Green Hold & Symmetric Dual-Hybrid)",
 		"role":              "challenger",
 		"status":            "running",
 		"champion_url":      s.cfg.ChampionURL,
@@ -146,6 +146,7 @@ func (s *Server) renderDashboardHTML(
 	var buyingPowerStr, cashStr, equityStr, plStr, dayPLStr string
 	var realizedStr, unrealizedStr string
 	realizedColor := "#94a3b8"
+	realizedClass := ""
 	unrealizedColor := "#94a3b8"
 	dayPLClass := ""
 	plClass := ""
@@ -171,8 +172,10 @@ func (s *Server) renderDashboardHTML(
 		if acct.RealizedPL > 0 {
 			realizedStr = "+" + formatCurrency(acct.RealizedPL)
 			realizedColor = "#34d399"
+			realizedClass = "card-value-green"
 		} else if acct.RealizedPL < 0 {
 			realizedColor = "#f87171"
+			realizedClass = "card-value-red"
 		}
 
 		unrealizedStr = formatCurrency(acct.UnrealizedPL)
@@ -484,10 +487,10 @@ func (s *Server) renderDashboardHTML(
 		<div class="header">
 			<div>
 				<h1 class="app-title">⚡ SignalStack Challenger Trading Agent</h1>
-				<p class="app-subtitle">Model 3 (Symmetric Dual-Hybrid) Shadow Gateway &bull; Broker: <span class="pill">%s</span> &bull; Webhook: <span style="color: %s; font-weight: 600;">%s</span> &bull; <span style="color: #a5b4fc; font-weight: 700;">Last Updated: %s</span> &bull; %s</p>
+				<p class="app-subtitle">Model 5 (Linear Green Hold & Symmetric Dual-Hybrid) Shadow Gateway &bull; Broker: <span class="pill">%s</span> &bull; Webhook: <span style="color: %s; font-weight: 600;">%s</span> &bull; <span style="color: #a5b4fc; font-weight: 700;">Last Updated: %s</span> &bull; %s</p>
 			</div>
 			<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
-				<span style="display: inline-flex; align-items: center; gap: 6px; background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(129, 140, 248, 0.5); color: #c7d2fe; padding: 6px 14px; border-radius: 9999px; font-size: 12px; font-weight: 700;">🏆 CHALLENGER MODEL 3 &bull; SYMMETRIC DUAL-HYBRID</span>
+				<span style="display: inline-flex; align-items: center; gap: 6px; background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(129, 140, 248, 0.5); color: #c7d2fe; padding: 6px 14px; border-radius: 9999px; font-size: 12px; font-weight: 700;">🏆 CHALLENGER MODEL 5 &bull; LINEAR GREEN HOLD &amp; SYMMETRIC DUAL-HYBRID</span>
 				<div style="display: flex; align-items: center; gap: 8px;">
 					<span class="bootstrap-badge">🚀 BOOTSTRAP ACTIVE</span>
 					<a href="https://signalstack-trading-agent.fly.dev" target="_blank" style="text-decoration:none; color: #a5b4fc; background: #312e81; border: 1px solid #6366f1; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">↗️ View Champion Agent</a>
@@ -522,9 +525,9 @@ func (s *Server) renderDashboardHTML(
 			</div>
 			<div class="card">
 				<div class="card-title">Closed Trades Realized P&amp;L</div>
-				<div class="card-value card-value-green">%s</div>
+				<div class="card-value %s">%s</div>
 				<div style="font-size: 11px; color: #94a3b8; margin-top: 5px;">
-					<span style="color: #34d399; font-weight: 700;">🏆 %s</span>
+					<span style="color: %s; font-weight: 700;">🏆 %s</span>
 				</div>
 			</div>
 			<div class="card">
@@ -649,7 +652,7 @@ func (s *Server) renderDashboardHTML(
 		s.broker.Name(), webhookColor, webhookStatus, lastUpdatedStr, refreshStatusHTML,
 		acctNum, acctStatus, buyingPowerStr, cashStr, equityStr,
 		dayPLClass, dayPLStr, len(positions),
-		realizedStr, winRateStr,
+		realizedClass, realizedStr, realizedColor, winRateStr,
 		plClass, plStr, realizedColor, realizedStr, unrealizedColor, unrealizedStr,
 		len(positions), lastUpdatedStr, posRowsHTML,
 		closedCount, closedRowsHTML,

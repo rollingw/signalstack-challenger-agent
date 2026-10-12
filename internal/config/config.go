@@ -57,7 +57,7 @@ func LoadFromEnv() *Config {
 	serviceName := getEnv("SERVICE_NAME", "SignalStack Challenger Trading Agent")
 	accountNum := getEnv("ACCOUNT_NUMBER", "SS-CHALLENGER-MAIN")
 	accountID := getEnv("ACCOUNT_ID", "signalstack-challenger-001")
-	agentRole := getEnv("AGENT_ROLE", "Challenger (Option A: Symmetric Dual-Hybrid)")
+	agentRole := getEnv("AGENT_ROLE", "Challenger Model 5 (Linear Green Hold & Symmetric Dual-Hybrid)")
 	championURL := getEnv("CHAMPION_URL", "https://signalstack-trading-agent.fly.dev")
 
 	return &Config{
