@@ -743,50 +743,86 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 		sym := strings.ToUpper(strings.TrimSpace(o.Symbol))
 		act := strings.ToUpper(strings.TrimSpace(o.Action))
 		matched := false
+
+		// A. Try exact match by order_id or client_order_id or signal_id in execution_journal
 		if o.OrderID != "" || o.ClientOrderID != "" {
-			res, _ := tx.ExecContext(ctx, `
-				UPDATE execution_journal
-				SET fill_price = ?, status = 'filled'
-				WHERE (order_id = ? AND order_id != '') OR (client_order_id = ? AND client_order_id != '');
-			`, o.FillPrice, o.OrderID, o.ClientOrderID)
-			if res != nil {
-				if n, err := res.RowsAffected(); err == nil && n > 0 {
-					matched = true
-				}
-			}
-			if o.ClientOrderID != "" {
-				resTrade, _ := tx.ExecContext(ctx, `
-					UPDATE paper_trades
-					SET price = ?
-					WHERE signal_id = ?;
-				`, o.FillPrice, o.ClientOrderID)
-				if resTrade != nil {
-					if n, err := resTrade.RowsAffected(); err == nil && n > 0 {
-						matched = true
+			var execID int64
+			var execSigID string
+			err := tx.QueryRowContext(ctx, `
+				SELECT id, signal_id FROM execution_journal
+				WHERE (order_id = ? AND order_id != '')
+				   OR (client_order_id = ? AND client_order_id != '')
+				   OR (signal_id = ? AND signal_id != '')
+				ORDER BY id DESC LIMIT 1;
+			`, o.OrderID, o.ClientOrderID, o.ClientOrderID).Scan(&execID, &execSigID)
+			if err == nil && execID > 0 {
+				matched = true
+				_, _ = tx.ExecContext(ctx, `
+					UPDATE execution_journal
+					SET fill_price = ?, status = 'filled'
+					WHERE id = ?;
+				`, o.FillPrice, execID)
+
+				if execSigID != "" {
+					if o.RealizedPL != nil {
+						_, _ = tx.ExecContext(ctx, `
+							UPDATE paper_trades
+							SET price = ?, realized_pl = ?
+							WHERE signal_id = ?;
+						`, o.FillPrice, *o.RealizedPL, execSigID)
+					} else {
+						_, _ = tx.ExecContext(ctx, `
+							UPDATE paper_trades
+							SET price = ?
+							WHERE signal_id = ?;
+						`, o.FillPrice, execSigID)
 					}
 				}
 			}
 		}
-		if !matched && sym != "" && act != "" {
-			if strings.HasPrefix(o.ClientOrderID, "sig-") || o.ClientOrderID == "" {
-				_, _ = tx.ExecContext(ctx, `
-					UPDATE execution_journal
-					SET fill_price = ?, status = 'filled'
-					WHERE id = (
-						SELECT id FROM execution_journal
-						WHERE symbol = ? AND action = ?
-						ORDER BY id DESC LIMIT 1
-					);
-				`, o.FillPrice, sym, act)
-				_, _ = tx.ExecContext(ctx, `
-					UPDATE paper_trades
-					SET price = ?
-					WHERE id = (
-						SELECT id FROM paper_trades
-						WHERE symbol = ? AND action = ?
-						ORDER BY id DESC LIMIT 1
-					);
-				`, o.FillPrice, sym, act)
+
+		// B. Fallback: match by symbol, action, and shares
+		if !matched && sym != "" && act != "" && o.Shares > 0 {
+			var tradeID int64
+			var tradeSigID string
+			err := tx.QueryRowContext(ctx, `
+				SELECT id, signal_id FROM paper_trades
+				WHERE symbol = ? AND action = ? AND ROUND(shares) = ROUND(?)
+				ORDER BY id DESC LIMIT 1;
+			`, sym, act, o.Shares).Scan(&tradeID, &tradeSigID)
+			if err == nil && tradeID > 0 {
+				matched = true
+				if o.RealizedPL != nil {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE paper_trades
+						SET price = ?, realized_pl = ?
+						WHERE id = ?;
+					`, o.FillPrice, *o.RealizedPL, tradeID)
+				} else {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE paper_trades
+						SET price = ?
+						WHERE id = ?;
+					`, o.FillPrice, tradeID)
+				}
+
+				if tradeSigID != "" {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE execution_journal
+						SET fill_price = ?, status = 'filled'
+						WHERE signal_id = ?;
+					`, o.FillPrice, tradeSigID)
+				} else {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE execution_journal
+						SET fill_price = ?, status = 'filled'
+						WHERE id = (
+							SELECT id FROM execution_journal
+							WHERE symbol = ? AND action = ? AND ROUND(requested_shares) = ROUND(?)
+							ORDER BY id DESC LIMIT 1
+						);
+					`, o.FillPrice, sym, act, o.Shares)
+				}
 			}
 		}
 	}

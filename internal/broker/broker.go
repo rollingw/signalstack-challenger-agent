@@ -81,12 +81,13 @@ type ReconcilePositionItem struct {
 
 // ReconcileOrderFillItem represents an executed broker order fill.
 type ReconcileOrderFillItem struct {
-	Symbol        string  `json:"symbol"`
-	Action        string  `json:"action"` // "BUY" or "SELL"
-	Shares        float64 `json:"shares"`
-	FillPrice     float64 `json:"fill_price"`
-	OrderID       string  `json:"order_id,omitempty"`
-	ClientOrderID string  `json:"client_order_id,omitempty"`
+	Symbol        string   `json:"symbol"`
+	Action        string   `json:"action"` // "BUY" or "SELL"
+	Shares        float64  `json:"shares"`
+	FillPrice     float64  `json:"fill_price"`
+	OrderID       string   `json:"order_id,omitempty"`
+	ClientOrderID string   `json:"client_order_id,omitempty"`
+	RealizedPL    *float64 `json:"realized_pl,omitempty"`
 }
 
 // Broker defines the standard abstraction for broker adapters.
