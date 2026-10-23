@@ -12,6 +12,25 @@ import (
 
 var symbolRegex = regexp.MustCompile(`^[A-Za-z0-9\.\-\_]{1,16}$`)
 
+// PairMap maps each Direxion Bull/Bear 3x/2x ETF to its inverse partner.
+// Holding both sides of the same pair simultaneously is strictly prohibited.
+var PairMap = map[string]string{
+	"FAS":  "FAZ",
+	"FAZ":  "FAS",
+	"GUSH": "DRIP",
+	"DRIP": "GUSH",
+	"LABU": "LABD",
+	"LABD": "LABU",
+	"SOXL": "SOXS",
+	"SOXS": "SOXL",
+	"SPXL": "SPXS",
+	"SPXS": "SPXL",
+	"TECL": "TECS",
+	"TECS": "TECL",
+	"TNA":  "TZA",
+	"TZA":  "TNA",
+}
+
 // TradeSignal represents the broker-neutral JSON trade instruction from the Python model.
 type TradeSignal struct {
 	SignalID    string  `json:"signal_id"`

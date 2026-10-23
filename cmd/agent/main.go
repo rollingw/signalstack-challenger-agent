@@ -54,9 +54,12 @@ func main() {
 	multiJ := journal.NewMultiJournal(sqliteJ, pbJ, neonJ)
 	defer multiJ.Close()
 
-	// 5. Initialize Broker Adapter (SignalStack Paper)
+	// 5. Initialize Broker Adapter (SignalStack / Alpaca Paper)
 	ssBroker := broker.NewSignalStackBroker(cfg.SignalStackWebhookURL, cfg.SignalStackAPIKey, cfg.SignalStackExitAction, cfg.BootstrapMode, sqliteJ)
-	if cfg.SignalStackWebhookURL != "" {
+	ssBroker.SetAlpacaCredentials(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey, cfg.AlpacaBaseURL)
+	if ssBroker.HasAlpaca() {
+		log.Printf("✅ Alpaca Paper Broker initialized for account %s (%s)", cfg.AccountNumber, cfg.AlpacaBaseURL)
+	} else if cfg.SignalStackWebhookURL != "" {
 		log.Printf("✅ SignalStack Broker initialized with Webhook URL: %s (Exit Action: %s)", cfg.SignalStackWebhookURL, cfg.SignalStackExitAction)
 	} else {
 		log.Println("ℹ️ SIGNALSTACK_WEBHOOK_URL not set: Operating in Local Simulation / Dry-run Mode")

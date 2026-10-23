@@ -28,11 +28,14 @@ type SignalStackBroker struct {
 	apiKey        string
 	exitAction    string
 	bootstrapMode bool
+	alpacaKey     string
+	alpacaSecret  string
+	alpacaBaseURL string
 	journal       JournalProvider
 	httpClient    *http.Client
 }
 
-// NewSignalStackBroker creates a new broker adapter for SignalStack paper trading.
+// NewSignalStackBroker creates a new broker adapter for SignalStack / Alpaca paper trading.
 func NewSignalStackBroker(webhookURL, apiKey, exitAction string, bootstrapMode bool, jp JournalProvider) *SignalStackBroker {
 	if exitAction == "" {
 		exitAction = "sell"
@@ -42,6 +45,7 @@ func NewSignalStackBroker(webhookURL, apiKey, exitAction string, bootstrapMode b
 		apiKey:        strings.TrimSpace(apiKey),
 		exitAction:    strings.ToLower(strings.TrimSpace(exitAction)),
 		bootstrapMode: bootstrapMode,
+		alpacaBaseURL: "https://paper-api.alpaca.markets",
 		journal:       jp,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
@@ -49,7 +53,22 @@ func NewSignalStackBroker(webhookURL, apiKey, exitAction string, bootstrapMode b
 	}
 }
 
+func (b *SignalStackBroker) SetAlpacaCredentials(key, secret, baseURL string) {
+	b.alpacaKey = strings.TrimSpace(key)
+	b.alpacaSecret = strings.TrimSpace(secret)
+	if strings.TrimSpace(baseURL) != "" {
+		b.alpacaBaseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	}
+}
+
+func (b *SignalStackBroker) HasAlpaca() bool {
+	return b.alpacaKey != "" && b.alpacaSecret != ""
+}
+
 func (b *SignalStackBroker) Name() string {
+	if b.HasAlpaca() {
+		return "alpaca_paper"
+	}
 	return "signalstack_paper"
 }
 
@@ -210,6 +229,66 @@ func (b *SignalStackBroker) SubmitOrder(ctx context.Context, req *OrderRequest) 
 		}
 		log.Printf("[SignalStackBroker] ✅ Successfully dispatched %s %g %s to SignalStack (HTTP %d, Order ID: %s)",
 			strings.ToUpper(side), req.Qty, symbol, resp.StatusCode, orderID)
+	} else if b.HasAlpaca() {
+		clientOrdID := req.ClientOrderID
+		if len(clientOrdID) > 48 {
+			clientOrdID = clientOrdID[:48]
+		}
+		if clientOrdID == "" {
+			clientOrdID = fmt.Sprintf("ch-%s-%d", symbol, now.Unix())
+		}
+
+		// Check current Alpaca position first for duplicate-buy / unheld-sell protection
+		posReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/v2/positions/%s", b.alpacaBaseURL, symbol), nil)
+		posReq.Header.Set("APCA-API-KEY-ID", b.alpacaKey)
+		posReq.Header.Set("APCA-API-SECRET-KEY", b.alpacaSecret)
+		heldOnAlpaca := false
+		if posResp, pErr := b.httpClient.Do(posReq); pErr == nil {
+			if posResp.StatusCode == http.StatusOK {
+				heldOnAlpaca = true
+			}
+			posResp.Body.Close()
+		}
+
+		if side == "buy" && heldOnAlpaca {
+			rawResp = `{"status":"accepted","message":"Position already held on Alpaca Paper account"}`
+			log.Printf("[SignalStackBroker] 🛡️ Alpaca Paper: Position for %s already held on PA3HW1A38DR2 (idempotent pass)", symbol)
+		} else if side == "sell" && !heldOnAlpaca {
+			rawResp = `{"status":"accepted","message":"Position already closed or pre-dates Alpaca account switch"}`
+			log.Printf("[SignalStackBroker] 🛡️ Alpaca Paper: Position for %s not held on PA3HW1A38DR2 (closing SQLite ledger only)", symbol)
+		} else {
+			alpacaOrder := map[string]string{
+				"symbol":          symbol,
+				"qty":             fmt.Sprintf("%g", req.Qty),
+				"side":            side,
+				"type":            "market",
+				"time_in_force":   "day",
+				"client_order_id": clientOrdID,
+			}
+			ordBytes, _ := json.Marshal(alpacaOrder)
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.alpacaBaseURL+"/v2/orders", bytes.NewReader(ordBytes))
+			if err == nil {
+				httpReq.Header.Set("APCA-API-KEY-ID", b.alpacaKey)
+				httpReq.Header.Set("APCA-API-SECRET-KEY", b.alpacaSecret)
+				httpReq.Header.Set("Content-Type", "application/json")
+				resp, dErr := b.httpClient.Do(httpReq)
+				if dErr == nil {
+					defer resp.Body.Close()
+					bodyBytes, _ := io.ReadAll(resp.Body)
+					rawResp = string(bodyBytes)
+					var parsedOrd map[string]any
+					if json.Unmarshal(bodyBytes, &parsedOrd) == nil {
+						if idVal, ok := parsedOrd["id"].(string); ok && idVal != "" {
+							orderID = idVal
+						}
+					}
+					log.Printf("[SignalStackBroker] ✅ Dispatched %s %g %s to Alpaca Paper (HTTP %d, Order ID: %s)",
+						strings.ToUpper(side), req.Qty, symbol, resp.StatusCode, orderID)
+				} else {
+					log.Printf("[SignalStackBroker] ⚠️ Alpaca order HTTP error: %v", dErr)
+				}
+			}
+		}
 	} else {
 		rawResp = `{"status":"simulated","message":"Dry-run simulation mode"}`
 		log.Printf("[SignalStackBroker] [DRY RUN / SIMULATION] Executed %s %g %s @ $%.2f (Signal ID: %s)",

@@ -306,6 +306,11 @@ func (s *Server) renderDashboardHTML(
 				fillPriceStr = fmt.Sprintf("$%.2f", r.FillPrice)
 			}
 
+			dispShares := r.RequestedShares
+			if r.FilledShares > 0 {
+				dispShares = r.FilledShares
+			}
+
 			execRowsHTML += fmt.Sprintf(`
 			<tr style="border-bottom: 1px solid #1e293b;">
 				<td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #94a3b8;">%s</td>
@@ -319,7 +324,7 @@ func (s *Server) renderDashboardHTML(
 			</tr>`,
 				r.SignalID, r.Symbol,
 				actionColor, r.Action,
-				r.RequestedShares, r.SignalPrice,
+				dispShares, r.SignalPrice,
 				fillPriceStr,
 				statusBg, statusColor, strings.ToUpper(r.Status),
 				formatCST(r.SubmittedAt),
@@ -374,7 +379,10 @@ func (s *Server) renderDashboardHTML(
 
 	webhookStatus := "Configured"
 	webhookColor := "#10b981"
-	if s.broker.WebhookURL() == "" {
+	if s.broker.HasAlpaca() {
+		webhookStatus = "Live Alpaca Paper API Connected (PA3HW1A38DR2)"
+		webhookColor = "#10b981"
+	} else if s.broker.WebhookURL() == "" {
 		webhookStatus = "Simulation Mode (Set SIGNALSTACK_WEBHOOK_URL)"
 		webhookColor = "#fbbf24"
 	}
@@ -517,10 +525,10 @@ func (s *Server) renderDashboardHTML(
 				<div class="card-value">%s</div>
 			</div>
 			<div class="card">
-				<div class="card-title">Open Holdings Day Change</div>
+				<div class="card-title">Today's Day P&amp;L</div>
 				<div class="card-value %s">%s</div>
 				<div style="font-size: 11px; color: #94a3b8; margin-top: 5px;">
-					Intraday mark-to-market on %d open holdings
+					Today's closed fills + %d open holding(s) MTM
 				</div>
 			</div>
 			<div class="card">
@@ -930,6 +938,48 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 			"signal_id": sig.SignalID,
 		})
 		return
+	}
+
+	// 4b. Enforce Active Position & Inverse Pair Mutual Exclusion on BUY orders
+	if sig.Action == "BUY" {
+		if existingPos, err := s.broker.GetPosition(r.Context(), sig.Symbol); err == nil && existingPos != nil && existingPos.Qty > 0 {
+			msg := fmt.Sprintf("duplicate_open_position: %s is already held open (%g shares)", sig.Symbol, existingPos.Qty)
+			log.Printf("[Agent Server] Blocking duplicate BUY for %s: %s", sig.SignalID, msg)
+			s.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":     "duplicate_open_position",
+				"message":   msg,
+				"signal_id": sig.SignalID,
+			})
+			return
+		}
+		if partner, ok := safety.PairMap[sig.Symbol]; ok && partner != "" {
+			if partnerPos, err := s.broker.GetPosition(r.Context(), partner); err == nil && partnerPos != nil && partnerPos.Qty > 0 {
+				msg := fmt.Sprintf("pair_conflict_violation: cannot BUY %s while inverse partner %s is held open (%g shares)", sig.Symbol, partner, partnerPos.Qty)
+				log.Printf("[Agent Server] Blocking inverse pair conflict BUY for %s: %s", sig.SignalID, msg)
+				rejectedRec := &journal.ExecutionRecord{
+					SignalID:        sig.SignalID,
+					Broker:          s.broker.Name(),
+					ClientOrderID:   sig.SignalID,
+					Symbol:          sig.Symbol,
+					Action:          sig.Action,
+					RequestedShares: sig.Shares,
+					SignalPrice:     sig.SignalPrice,
+					Status:          "rejected",
+					Strategy:        sig.Strategy,
+					SubmittedAt:     time.Now().UTC(),
+					ErrorMessage:    msg,
+					CreatedAt:       time.Now().UTC(),
+				}
+				_ = s.journal.RecordExecution(r.Context(), rejectedRec)
+
+				s.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"error":     "pair_conflict_violation",
+					"message":   msg,
+					"signal_id": sig.SignalID,
+				})
+				return
+			}
+		}
 	}
 
 	// 5. Submit order to SignalStack Broker Adapter

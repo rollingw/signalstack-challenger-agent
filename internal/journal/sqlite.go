@@ -385,14 +385,14 @@ func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error)
 	if acctID == "" {
 		acctID = os.Getenv("ACCOUNT_ID")
 		if acctID == "" {
-			acctID = "signalstack-challenger-001"
+			acctID = "678a607c-193f-407a-aa27-e5dd864db293"
 		}
 	}
 	acctNum := s.accountNumber
 	if acctNum == "" {
 		acctNum = os.Getenv("ACCOUNT_NUMBER")
 		if acctNum == "" {
-			acctNum = "SS-CHALLENGER-MAIN"
+			acctNum = "PA3HW1A38DR2"
 		}
 	}
 
@@ -781,47 +781,74 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 			}
 		}
 
-		// B. Fallback: match by symbol, action, and shares
-		if !matched && sym != "" && act != "" && o.Shares > 0 {
+		// A2. Try direct signal_id match in paper_trades (via order_id or client_order_id)
+		if !matched && (o.OrderID != "" || o.ClientOrderID != "") {
 			var tradeID int64
-			var tradeSigID string
 			err := tx.QueryRowContext(ctx, `
-				SELECT id, signal_id FROM paper_trades
-				WHERE symbol = ? AND action = ? AND ROUND(shares) = ROUND(?)
+				SELECT id FROM paper_trades
+				WHERE (signal_id = ? AND signal_id != '')
+				   OR (signal_id = ? AND signal_id != '')
 				ORDER BY id DESC LIMIT 1;
-			`, sym, act, o.Shares).Scan(&tradeID, &tradeSigID)
+			`, o.OrderID, o.ClientOrderID).Scan(&tradeID)
 			if err == nil && tradeID > 0 {
 				matched = true
 				if o.RealizedPL != nil {
 					_, _ = tx.ExecContext(ctx, `
 						UPDATE paper_trades
-						SET price = ?, realized_pl = ?
+						SET shares = ?, price = ?, realized_pl = ?
 						WHERE id = ?;
-					`, o.FillPrice, *o.RealizedPL, tradeID)
+					`, o.Shares, o.FillPrice, *o.RealizedPL, tradeID)
 				} else {
 					_, _ = tx.ExecContext(ctx, `
 						UPDATE paper_trades
-						SET price = ?
+						SET shares = ?, price = ?
 						WHERE id = ?;
-					`, o.FillPrice, tradeID)
+					`, o.Shares, o.FillPrice, tradeID)
+				}
+			}
+		}
+
+		// B. Fallback: match latest trade by symbol and action
+		if !matched && sym != "" && act != "" && o.Shares > 0 {
+			var tradeID int64
+			var tradeSigID string
+			_ = tx.QueryRowContext(ctx, `
+				SELECT id, signal_id FROM paper_trades
+				WHERE symbol = ? AND action = ?
+				ORDER BY id DESC LIMIT 1;
+			`, sym, act).Scan(&tradeID, &tradeSigID)
+			if tradeID > 0 {
+				matched = true
+				if o.RealizedPL != nil {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE paper_trades
+						SET shares = ?, price = ?, realized_pl = ?
+						WHERE id = ?;
+					`, o.Shares, o.FillPrice, *o.RealizedPL, tradeID)
+				} else {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE paper_trades
+						SET shares = ?, price = ?
+						WHERE id = ?;
+					`, o.Shares, o.FillPrice, tradeID)
 				}
 
 				if tradeSigID != "" {
 					_, _ = tx.ExecContext(ctx, `
 						UPDATE execution_journal
-						SET fill_price = ?, status = 'filled'
+						SET filled_shares = ?, fill_price = ?, status = 'filled'
 						WHERE signal_id = ?;
-					`, o.FillPrice, tradeSigID)
+					`, o.Shares, o.FillPrice, tradeSigID)
 				} else {
 					_, _ = tx.ExecContext(ctx, `
 						UPDATE execution_journal
-						SET fill_price = ?, status = 'filled'
+						SET filled_shares = ?, fill_price = ?, status = 'filled'
 						WHERE id = (
 							SELECT id FROM execution_journal
-							WHERE symbol = ? AND action = ? AND ROUND(requested_shares) = ROUND(?)
+							WHERE symbol = ? AND action = ?
 							ORDER BY id DESC LIMIT 1
 						);
-					`, o.FillPrice, sym, act, o.Shares)
+					`, o.Shares, o.FillPrice, sym, act)
 				}
 			}
 		}
@@ -912,6 +939,10 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 		if len(activeSymbols) == 0 {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM paper_positions;`); err != nil {
 				return fmt.Errorf("failed to clear positions: %w", err)
+			}
+			if len(orders) == 0 {
+				_, _ = tx.ExecContext(ctx, `DELETE FROM paper_trades;`)
+				_, _ = tx.ExecContext(ctx, `DELETE FROM execution_journal;`)
 			}
 		} else {
 			rows, err := tx.QueryContext(ctx, `SELECT symbol FROM paper_positions;`)

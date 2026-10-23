@@ -31,6 +31,9 @@ type Config struct {
 	AccountID               string
 	AgentRole               string
 	ChampionURL             string
+	AlpacaAPIKey            string
+	AlpacaSecretKey         string
+	AlpacaBaseURL           string
 }
 
 // LoadFromEnv loads configuration from environment variables with safe defaults.
@@ -55,10 +58,13 @@ func LoadFromEnv() *Config {
 	timeoutSec := getEnvInt("ORDER_TIMEOUT_SEC", 15)
 
 	serviceName := getEnv("SERVICE_NAME", "SignalStack Challenger Trading Agent")
-	accountNum := getEnv("ACCOUNT_NUMBER", "SS-CHALLENGER-MAIN")
-	accountID := getEnv("ACCOUNT_ID", "signalstack-challenger-001")
-	agentRole := getEnv("AGENT_ROLE", "Challenger Model 5 (Linear Green Hold & Symmetric Dual-Hybrid)")
+	accountNum := getEnv("ACCOUNT_NUMBER", "PA3HW1A38DR2")
+	accountID := getEnv("ACCOUNT_ID", "678a607c-193f-407a-aa27-e5dd864db293")
+	agentRole := getEnv("AGENT_ROLE", "Challenger M7d (OCC T+1 Mandatory Overnight Hold)")
 	championURL := getEnv("CHAMPION_URL", "https://signalstack-trading-agent.fly.dev")
+	alpacaKey := getEnv("ALPACA_API_KEY", getEnv("CHALLENGER_ALPACA_API_KEY", ""))
+	alpacaSecret := getEnv("ALPACA_SECRET_KEY", getEnv("CHALLENGER_ALPACA_SECRET_KEY", ""))
+	alpacaBaseURL := getEnv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
 	return &Config{
 		Port:                    port,
@@ -83,6 +89,9 @@ func LoadFromEnv() *Config {
 		AccountID:               accountID,
 		AgentRole:               agentRole,
 		ChampionURL:             championURL,
+		AlpacaAPIKey:            alpacaKey,
+		AlpacaSecretKey:         alpacaSecret,
+		AlpacaBaseURL:           alpacaBaseURL,
 	}
 }
 
