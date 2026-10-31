@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
+export PATH="$HOME/.fly/bin:$PATH"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -15,49 +17,40 @@ if ! command -v flyctl &> /dev/null; then
 fi
 
 echo "Checking Fly authentication..."
-if ! flyctl auth whoami &> /dev/null; then
-    echo "⚠️ Fly session expired or not authenticated. Please run:"
-    echo "   flyctl auth login"
-    exit 1
+if ! flyctl auth whoami </dev/null &> /dev/null; then
+    echo "⚠️ Fly session expired. Starting interactive login..."
+    echo "   (Open the link below in your browser, approve, and paste the verification code if prompted)"
+    flyctl auth login
 fi
 
-# 2. Check or create volume
+# 2. App name
 APP_NAME=$(grep '^app =' fly.toml | cut -d'"' -f2)
 echo "App name: $APP_NAME"
 
-echo "Checking if volume 'signalstack_challenger_data' exists..."
-if ! flyctl volumes list -a "$APP_NAME" 2>/dev/null | grep -q "signalstack_challenger_data"; then
-    echo "Creating persistent volume 'signalstack_challenger_data' (region: ord, size: 1GB)..."
-    flyctl volumes create signalstack_challenger_data --app "$APP_NAME" --region ord --size 1 --yes
-else
-    echo "✅ Volume 'signalstack_challenger_data' already exists."
+# 3. Optional secret sync (only when --sync-secrets is passed, to avoid double machine restarts)
+if [[ "${1:-}" == "--sync-secrets" ]]; then
+    if [ -f .env ]; then
+        echo "Loading secrets from .env..."
+        # shellcheck disable=SC1091
+        set -a
+        source .env
+        set +a
+    fi
+
+    SECRETS_TO_SET=()
+    [ -n "$SIGNAL_SECRET" ] && SECRETS_TO_SET+=("SIGNAL_SECRET=$SIGNAL_SECRET")
+    [ -n "$SIGNALSTACK_WEBHOOK_URL" ] && SECRETS_TO_SET+=("SIGNALSTACK_WEBHOOK_URL=$SIGNALSTACK_WEBHOOK_URL")
+    [ -n "$NEON_DATABASE_URL" ] && SECRETS_TO_SET+=("NEON_DATABASE_URL=$NEON_DATABASE_URL")
+
+    if [ ${#SECRETS_TO_SET[@]} -gt 0 ]; then
+        echo "Setting secrets on Fly..."
+        flyctl secrets set "${SECRETS_TO_SET[@]}" --app "$APP_NAME"
+    fi
 fi
 
-# 3. Set secrets (load from .env if present)
-if [ -f .env ]; then
-    echo "Loading secrets from .env..."
-    # shellcheck disable=SC1091
-    set -a
-    source .env
-    set +a
-fi
-
-SECRETS_TO_SET=()
-[ -n "$SIGNAL_SECRET" ] && SECRETS_TO_SET+=("SIGNAL_SECRET=$SIGNAL_SECRET")
-[ -n "$SIGNALSTACK_WEBHOOK_URL" ] && SECRETS_TO_SET+=("SIGNALSTACK_WEBHOOK_URL=$SIGNALSTACK_WEBHOOK_URL")
-[ -n "$NEON_DATABASE_URL" ] && SECRETS_TO_SET+=("NEON_DATABASE_URL=$NEON_DATABASE_URL")
-
-if [ ${#SECRETS_TO_SET[@]} -gt 0 ]; then
-    echo "Setting secrets on Fly..."
-    flyctl secrets set "${SECRETS_TO_SET[@]}" --app "$APP_NAME"
-else
-    echo "ℹ️  No secrets passed via .env or environment variables."
-    echo "   Ensure secrets are set in Fly via: flyctl secrets set KEY=VALUE --app $APP_NAME"
-fi
-
-# 4. Deploy
-echo "Deploying to Fly.io..."
-flyctl deploy --config fly.toml
+# 4. Deploy using local Docker daemon (avoids remote builder WireGuard hangs)
+echo "Deploying to Fly.io using local Docker build (--local-only)..."
+flyctl deploy --config fly.toml --local-only
 
 echo "========================================================="
 echo "✅ Deployment complete!"
