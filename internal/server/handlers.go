@@ -980,6 +980,30 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
+		// 4c. Same-Day Wash Re-Buy Guard: block buying a symbol on the same CST trading day it was already SOLD
+		todayCST := time.Now().In(cstLocation).Format("2006-01-02")
+		if recentRecs, err := s.journal.GetRecentExecutions(r.Context(), 50); err == nil {
+			for _, rec := range recentRecs {
+				if rec == nil || !strings.EqualFold(rec.Symbol, sig.Symbol) || !strings.EqualFold(rec.Action, "SELL") {
+					continue
+				}
+				st := strings.ToLower(rec.Status)
+				if st != "filled" && st != "submitted" && st != "accepted" && st != "new" && st != "partially_filled" {
+					continue
+				}
+				if rec.SubmittedAt.In(cstLocation).Format("2006-01-02") == todayCST {
+					msg := fmt.Sprintf("same_day_wash_rebuy: cannot re-BUY %s on %s after same-day SELL (%s)", sig.Symbol, todayCST, rec.SignalID)
+					log.Printf("[Agent Server] Blocking same-day wash re-BUY for %s: %s", sig.SignalID, msg)
+					s.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+						"error":     "same_day_wash_rebuy",
+						"message":   msg,
+						"signal_id": sig.SignalID,
+					})
+					return
+				}
+			}
+		}
 	}
 
 	// 5. Submit order to SignalStack Broker Adapter
