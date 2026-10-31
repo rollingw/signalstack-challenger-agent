@@ -981,8 +981,7 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// 4c. Same-Day Wash Re-Buy Guard: block buying a symbol on the same CST trading day it was already SOLD
-		todayCST := time.Now().In(cstLocation).Format("2006-01-02")
+		// 4c. Same-Bar Churn Re-Buy Guard: block re-buying a symbol within 60 minutes of a SELL (same 4H bar churn)
 		if recentRecs, err := s.journal.GetRecentExecutions(r.Context(), 50); err == nil {
 			for _, rec := range recentRecs {
 				if rec == nil || !strings.EqualFold(rec.Symbol, sig.Symbol) || !strings.EqualFold(rec.Action, "SELL") {
@@ -992,11 +991,11 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 				if st != "filled" && st != "submitted" && st != "accepted" && st != "new" && st != "partially_filled" {
 					continue
 				}
-				if rec.SubmittedAt.In(cstLocation).Format("2006-01-02") == todayCST {
-					msg := fmt.Sprintf("same_day_wash_rebuy: cannot re-BUY %s on %s after same-day SELL (%s)", sig.Symbol, todayCST, rec.SignalID)
-					log.Printf("[Agent Server] Blocking same-day wash re-BUY for %s: %s", sig.SignalID, msg)
+				if !rec.SubmittedAt.IsZero() && time.Since(rec.SubmittedAt) < 60*time.Minute {
+					msg := fmt.Sprintf("same_bar_churn_rebuy: cannot re-BUY %s within 60m of SELL (%s at %s)", sig.Symbol, rec.SignalID, rec.SubmittedAt.In(cstLocation).Format(time.RFC3339))
+					log.Printf("[Agent Server] Blocking same-bar churn re-BUY for %s: %s", sig.SignalID, msg)
 					s.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-						"error":     "same_day_wash_rebuy",
+						"error":     "same_bar_churn_rebuy",
 						"message":   msg,
 						"signal_id": sig.SignalID,
 					})
