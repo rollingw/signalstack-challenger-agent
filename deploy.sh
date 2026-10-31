@@ -6,6 +6,13 @@ export PATH="$HOME/.fly/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+if [ -f .env ]; then
+    # shellcheck disable=SC1091
+    set -a
+    source .env
+    set +a
+fi
+
 echo "========================================================="
 echo "🚀 SignalStack Challenger Trading Agent Fly.io Deployment"
 echo "========================================================="
