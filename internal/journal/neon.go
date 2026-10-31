@@ -134,3 +134,132 @@ func (n *NeonJournal) UpdateFill(ctx context.Context, rec *ExecutionRecord) erro
 	}
 	return nil
 }
+
+// NeonZZTrade represents a row from Neon zz_trades for historical & live ledger reconciliation.
+type NeonZZTrade struct {
+	ID         string
+	Symbol     string
+	State      string
+	BuySignal  string
+	EntryDate  time.Time
+	EntryPrice float64
+	Shares     float64
+	Cost       float64
+	ExitDate   time.Time
+	ExitPrice  float64
+	ExitReason string
+	PL         float64
+	PLPct      float64
+	BarsHeld   int
+}
+
+// NeonNotifiedExit represents a row from notified_trade_exits.
+type NeonNotifiedExit struct {
+	Symbol     string
+	EntryDate  string
+	ExitDate   string
+	ExitReason string
+	BarsHeld   int
+}
+
+// NeonChallengerExit represents a row from notified_challenger_exits.
+type NeonChallengerExit struct {
+	ID         int64
+	Symbol     string
+	ExitDate   string
+	SignalID   string
+	ExitReason string
+}
+
+// NeonTradeMetadata bundles strategy trade metadata from Neon PostgreSQL.
+type NeonTradeMetadata struct {
+	ZZTrades        []*NeonZZTrade
+	NotifiedExits   []*NeonNotifiedExit
+	ChallengerExits []*NeonChallengerExit
+}
+
+// GetTradeMetadata fetches zz_trades, notified_trade_exits, and notified_challenger_exits from Neon.
+func (n *NeonJournal) GetTradeMetadata(ctx context.Context) (*NeonTradeMetadata, error) {
+	if n == nil || n.db == nil {
+		return nil, nil
+	}
+
+	meta := &NeonTradeMetadata{
+		ZZTrades:        make([]*NeonZZTrade, 0),
+		NotifiedExits:   make([]*NeonNotifiedExit, 0),
+		ChallengerExits: make([]*NeonChallengerExit, 0),
+	}
+
+	// 1. Fetch zz_trades
+	rows, err := n.db.QueryContext(ctx, `
+		SELECT COALESCE(id::text, ''), COALESCE(symbol, ''), COALESCE(state, ''),
+		       COALESCE(buy_signal, ''), entry_date, COALESCE(entry_price, 0),
+		       COALESCE(shares, 0), COALESCE(cost, 0), exit_date,
+		       COALESCE(exit_price, 0), COALESCE(exit_reason, ''),
+		       COALESCE(pl, 0), COALESCE(pl_pct, 0), COALESCE(bars_held, 1)
+		FROM zz_trades
+		ORDER BY entry_date DESC;
+	`)
+	if err == nil {
+		for rows.Next() {
+			var t NeonZZTrade
+			var enDT, exDT sql.NullTime
+			if err := rows.Scan(
+				&t.ID, &t.Symbol, &t.State, &t.BuySignal, &enDT, &t.EntryPrice,
+				&t.Shares, &t.Cost, &exDT, &t.ExitPrice, &t.ExitReason,
+				&t.PL, &t.PLPct, &t.BarsHeld,
+			); err == nil {
+				if enDT.Valid {
+					t.EntryDate = enDT.Time
+				}
+				if exDT.Valid {
+					t.ExitDate = exDT.Time
+				}
+				meta.ZZTrades = append(meta.ZZTrades, &t)
+			}
+		}
+		rows.Close()
+	}
+
+	// 2. Fetch notified_trade_exits
+	nRows, err := n.db.QueryContext(ctx, `
+		SELECT COALESCE(symbol, ''),
+		       COALESCE(SUBSTRING(armed_date::text, 1, 10), ''),
+		       COALESCE(SUBSTRING(exit_date::text, 1, 10), ''),
+		       COALESCE(exit_reason, ''),
+		       COALESCE(bars_held, 0)
+		FROM notified_trade_exits
+		WHERE exit_date IS NOT NULL;
+	`)
+	if err == nil {
+		for nRows.Next() {
+			var ne NeonNotifiedExit
+			if err := nRows.Scan(&ne.Symbol, &ne.EntryDate, &ne.ExitDate, &ne.ExitReason, &ne.BarsHeld); err == nil {
+				meta.NotifiedExits = append(meta.NotifiedExits, &ne)
+			}
+		}
+		nRows.Close()
+	}
+
+	// 3. Fetch notified_challenger_exits
+	cRows, err := n.db.QueryContext(ctx, `
+		SELECT id, COALESCE(symbol, ''),
+		       COALESCE(exit_date::text, ''),
+		       COALESCE(signal_id, ''),
+		       COALESCE(exit_reason, '')
+		FROM notified_challenger_exits
+		WHERE exit_date IS NOT NULL
+		ORDER BY id ASC;
+	`)
+	if err == nil {
+		for cRows.Next() {
+			var ce NeonChallengerExit
+			if err := cRows.Scan(&ce.ID, &ce.Symbol, &ce.ExitDate, &ce.SignalID, &ce.ExitReason); err == nil {
+				meta.ChallengerExits = append(meta.ChallengerExits, &ce)
+			}
+		}
+		cRows.Close()
+	}
+
+	return meta, nil
+}

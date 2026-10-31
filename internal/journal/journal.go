@@ -62,6 +62,10 @@ func (m *MultiJournal) SQLite() *SQLiteJournal {
 	return m.sqlite
 }
 
+func (m *MultiJournal) Neon() *NeonJournal {
+	return m.neon
+}
+
 // IsDuplicate checks whether the given signal_id has already been processed.
 func (m *MultiJournal) IsDuplicate(ctx context.Context, signalID string) (bool, *ExecutionRecord, error) {
 	if m.sqlite == nil {

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"math"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,19 +19,39 @@ import (
 	"github.com/rollingw/signalstack-agent/internal/safety"
 )
 
+var canceledChallengerSignalIDs = map[string]bool{
+	"sig-exit-ch-LABU-202610281500-10": true,
+	"sig-exit-ch-TNA-202610281500-41":  true,
+	"sig-buy-LABD-202610281500-250":    true,
+	"sig-buy-SPXS-202610281500-100":    true,
+	"sig-buy-TZA-202610281500-50":      true,
+	"sig-exit-ch-TZA-202610291100-55":  true,
+	"sig-buy-TZA-202610291100-55":      true,
+	"sig-buy-ch-TZA-202610291100-55":   true,
+}
+
+func isCanceledOrTestSignal(sigID string) bool {
+	s := strings.TrimSpace(sigID)
+	return canceledChallengerSignalIDs[s] || strings.HasPrefix(s, "sig-test-")
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
 	acct, _ := s.broker.GetAccount(ctx)
 	positions, _ := s.broker.GetAllPositions(ctx)
 	recent, _ := s.journal.GetRecentExecutions(ctx, 15)
-	trades, _ := s.journal.SQLite().GetRecentTrades(ctx, 50)
+	trades, _ := s.journal.SQLite().GetRecentTrades(ctx, 1000)
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		var neonMeta *journal.NeonTradeMetadata
+		if s.journal.Neon() != nil {
+			neonMeta, _ = s.journal.Neon().GetTradeMetadata(ctx)
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, s.renderDashboardHTML(acct, positions, recent, trades))
+		fmt.Fprint(w, s.renderDashboardHTML(acct, positions, recent, trades, neonMeta))
 		return
 	}
 
@@ -111,6 +134,537 @@ func formatCSTShort(t time.Time) string {
 	return t.In(cstLocation).Format("2006-01-02 15:04") + " CST"
 }
 
+func formatBarCloseCST(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	dt := t.In(cstLocation)
+	if dt.Hour() == 7 && dt.Minute() == 0 {
+		dt = time.Date(dt.Year(), dt.Month(), dt.Day(), 11, 0, 0, 0, cstLocation)
+	}
+	return dt.Format("2006-01-02 15:04")
+}
+
+func formatFillPrice(val float64) string {
+	if val <= 0 {
+		return "-"
+	}
+	rounded2 := math.Round(val*100) / 100
+	if math.Abs(val-rounded2) >= 0.0005 {
+		s := fmt.Sprintf("%.4f", val)
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+		return "$" + s
+	}
+	return formatCurrency(val)
+}
+
+var (
+	tsRegex = regexp.MustCompile(`\b(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2})?(?:[+-]\d{2}:\d{2}|Z)?\b`)
+	reasonPatRegex = regexp.MustCompile(`^(TRAD_HH|TRAD_LH|TRAD_LL|TRAD_HL|ZZ_MACRO_HH_HELD_PAST_TRAD|ZZ_MACRO_LH_HELD_PAST_TRAD|LINEAR_RED_AFTER_TRAD|HH|LH|LL|HL) of (\d{4}-\d{2}-\d{2} \d{2}:\d{2})(.*)$`)
+)
+
+func toCSTText(text string) string {
+	if text == "" {
+		return ""
+	}
+	return tsRegex.ReplaceAllStringFunc(text, func(match string) string {
+		sub := tsRegex.FindStringSubmatch(match)
+		if len(sub) < 3 {
+			return match
+		}
+		datePart, timePart := sub[1], sub[2]
+		if timePart == "07:00" {
+			return datePart + " 11:00"
+		}
+		if timePart == "03:00" || timePart == "11:00" || timePart == "15:00" || timePart == "19:00" {
+			return datePart + " " + timePart
+		}
+		rawDT, err := time.Parse("2006-01-02 15:04", datePart+" "+timePart)
+		if err != nil {
+			return match
+		}
+		cstDT := rawDT.UTC().In(cstLocation)
+		if cstDT.Hour() == 7 && cstDT.Minute() == 0 {
+			cstDT = time.Date(cstDT.Year(), cstDT.Month(), cstDT.Day(), 11, 0, 0, 0, cstLocation)
+		}
+		return cstDT.Format("2006-01-02 15:04")
+	})
+}
+
+func formatTradeReason(reason string, symbol string) string {
+	r := strings.TrimSpace(reason)
+	if r == "" || r == "-" {
+		return "-"
+	}
+	text := toCSTText(r)
+	if symbol != "" {
+		if m := reasonPatRegex.FindStringSubmatch(text); len(m) == 4 {
+			return fmt.Sprintf("%s of %s (%s)%s", m[1], symbol, m[2], m[3])
+		}
+	}
+	return text
+}
+
+func mondayKeyCST(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	dt := t.In(cstLocation)
+	offset := (int(dt.Weekday()) + 6) % 7 // Monday = 0
+	mon := time.Date(dt.Year(), dt.Month(), dt.Day(), 0, 0, 0, 0, cstLocation).AddDate(0, 0, -offset)
+	return mon.Format("2006-01-02")
+}
+
+// ClosedLedgerRow represents a closed trade row for the Challenger M7d Closed Trade Ledger panel.
+type ClosedLedgerRow struct {
+	ID          string  `json:"id"`
+	Symbol      string  `json:"symbol"`
+	EntryDate   string  `json:"entry_date"`
+	EntryPrice  string  `json:"entry_price"`
+	ExitDate    string  `json:"exit_date"`
+	ExitTS      int64   `json:"exit_ts"`
+	ExitPrice   string  `json:"exit_price"`
+	Shares      float64 `json:"shares"`
+	Cost        string  `json:"cost"`
+	PLVal       float64 `json:"pl_val"`
+	PL          string  `json:"pl"`
+	PLPctVal    float64 `json:"pl_pct_val"`
+	PLPct       string  `json:"pl_pct"`
+	EnterReason string  `json:"enter_reason"`
+	ExitReason  string  `json:"exit_reason"`
+	BarsHeld    int     `json:"bars_held"`
+	WeekKey     string  `json:"week_key"`
+	IsBroker    bool    `json:"is_broker"`
+}
+
+type brokerClosedCycle struct {
+	ID          int64
+	Symbol      string
+	EntryDate   time.Time
+	EntryPrice  float64
+	ExitDate    time.Time
+	ExitPrice   float64
+	Shares      float64
+	Cost        float64
+	PL          float64
+	PLPct       float64
+	BarsHeld    int
+	BuySignal   string
+	ExitReason  string
+	BuySigID    string
+	SellSigID   string
+}
+
+func buildClosedTradeLedger(trades []*journal.PaperTrade, neonMeta *journal.NeonTradeMetadata) ([]*ClosedLedgerRow, []string) {
+	reasonsBySig := make(map[string]string)
+	buySigBySig := make(map[string]string)
+	buySigBySymDate := make(map[string]string)
+	reasonsBySpan := make(map[string]string)
+	reasonsByExit := make(map[string]string)
+	barsBySpan := make(map[string]int)
+	entryDateBySymExit := make(map[string]time.Time)
+
+	if neonMeta != nil {
+		for _, zt := range neonMeta.ZZTrades {
+			sym := strings.ToUpper(strings.TrimSpace(zt.Symbol))
+			if sym == "" {
+				continue
+			}
+			enDay := ""
+			if !zt.EntryDate.IsZero() {
+				enDay = zt.EntryDate.In(cstLocation).Format("2006-01-02")
+				if zt.BuySignal != "" {
+					buySigBySymDate[sym+"|"+enDay] = zt.BuySignal
+				}
+			}
+			if strings.EqualFold(zt.State, "closed") && !zt.ExitDate.IsZero() {
+				exDay := zt.ExitDate.In(cstLocation).Format("2006-01-02")
+				if !zt.EntryDate.IsZero() {
+					entryDateBySymExit[sym+"|"+exDay] = zt.EntryDate
+				}
+				if enDay != "" && zt.ExitReason != "" {
+					reasonsBySpan[sym+"|"+enDay+"|"+exDay] = zt.ExitReason
+				}
+				if zt.ExitReason != "" {
+					if _, exists := reasonsByExit[sym+"|"+exDay]; !exists {
+						reasonsByExit[sym+"|"+exDay] = zt.ExitReason
+					}
+				}
+				if enDay != "" && zt.BarsHeld > 0 {
+					barsBySpan[sym+"|"+enDay+"|"+exDay] = zt.BarsHeld
+				}
+			}
+		}
+
+		for _, ne := range neonMeta.NotifiedExits {
+			sym := strings.ToUpper(strings.TrimSpace(ne.Symbol))
+			if sym == "" || ne.ExitDate == "" {
+				continue
+			}
+			if ne.ExitReason != "" {
+				if ne.EntryDate != "" {
+					reasonsBySpan[sym+"|"+ne.EntryDate+"|"+ne.ExitDate] = ne.ExitReason
+				}
+				if _, exists := reasonsByExit[sym+"|"+ne.ExitDate]; !exists {
+					reasonsByExit[sym+"|"+ne.ExitDate] = ne.ExitReason
+				}
+			}
+			if ne.EntryDate != "" && ne.BarsHeld > 0 {
+				barsBySpan[sym+"|"+ne.EntryDate+"|"+ne.ExitDate] = ne.BarsHeld
+			}
+		}
+
+		for _, ce := range neonMeta.ChallengerExits {
+			sym := strings.ToUpper(strings.TrimSpace(ce.Symbol))
+			rsn := strings.TrimSpace(ce.ExitReason)
+			sig := strings.TrimSpace(ce.SignalID)
+			exDay := ce.ExitDate
+			if len(exDay) > 10 {
+				exDay = exDay[:10]
+			}
+			if strings.HasPrefix(rsn, "BUY:") {
+				cleanBuy := strings.TrimSpace(strings.TrimPrefix(rsn, "BUY:"))
+				if sig != "" {
+					buySigBySig[sig] = cleanBuy
+				}
+				if sym != "" && exDay != "" {
+					buySigBySymDate[sym+"|"+exDay] = cleanBuy
+				}
+			} else if rsn != "" {
+				if sig != "" {
+					reasonsBySig[sig] = rsn
+				}
+				if sym != "" && exDay != "" {
+					reasonsByExit[sym+"|"+exDay] = rsn
+				}
+			}
+		}
+	}
+
+	// Sort SQLite paper_trades chronologically ascending
+	sortedTrades := make([]*journal.PaperTrade, 0, len(trades))
+	for _, t := range trades {
+		if t == nil || isCanceledOrTestSignal(t.SignalID) {
+			continue
+		}
+		sortedTrades = append(sortedTrades, t)
+	}
+	sort.Slice(sortedTrades, func(i, j int) bool {
+		if sortedTrades[i].Timestamp.Equal(sortedTrades[j].Timestamp) {
+			return sortedTrades[i].ID < sortedTrades[j].ID
+		}
+		return sortedTrades[i].Timestamp.Before(sortedTrades[j].Timestamp)
+	})
+
+	type buyLot struct {
+		shares   float64
+		price    float64
+		dt       time.Time
+		signalID string
+	}
+	inventory := make(map[string][]*buyLot)
+	brokerCycles := make([]*brokerClosedCycle, 0)
+
+	for _, t := range sortedTrades {
+		sym := strings.ToUpper(strings.TrimSpace(t.Symbol))
+		act := strings.ToUpper(strings.TrimSpace(t.Action))
+		shs := t.Shares
+		px := t.Price
+		sig := strings.TrimSpace(t.SignalID)
+		rpl := math.Round(t.RealizedPL*100) / 100
+		dt := t.Timestamp.In(cstLocation)
+
+		if sym == "" || t.Timestamp.IsZero() {
+			continue
+		}
+
+		if act == "BUY" {
+			inventory[sym] = append(inventory[sym], &buyLot{
+				shares:   shs,
+				price:    px,
+				dt:       dt,
+				signalID: sig,
+			})
+		} else if act == "SELL" {
+			remShs := shs
+			var buyEntries []*buyLot
+			for remShs > 0 && len(inventory[sym]) > 0 {
+				lastIdx := len(inventory[sym]) - 1
+				b := inventory[sym][lastIdx]
+				if b.shares <= remShs {
+					buyEntries = append(buyEntries, b)
+					remShs -= b.shares
+					inventory[sym] = inventory[sym][:lastIdx]
+				} else {
+					buyEntries = append(buyEntries, &buyLot{
+						shares:   remShs,
+						price:    b.price,
+						dt:       b.dt,
+						signalID: b.signalID,
+					})
+					b.shares -= remShs
+					remShs = 0
+				}
+			}
+			inventory[sym] = nil
+
+			totCost := 0.0
+			for _, b := range buyEntries {
+				totCost += b.shares * b.price
+			}
+			totCost = math.Round(totCost*100) / 100
+			avgEntryPx := 0.0
+			var entryDT time.Time
+			buySigID := ""
+			if shs > 0 && len(buyEntries) > 0 {
+				avgEntryPx = math.Round((totCost/shs)*10000) / 10000
+				entryDT = buyEntries[0].dt
+				buySigID = buyEntries[0].signalID
+			}
+
+			if shs > 0 && px > 0 && (rpl != 0 || len(buyEntries) == 0) {
+				impliedEP := math.Round((px-(rpl/shs))*10000) / 10000
+				if impliedEP > 0 && (avgEntryPx <= 0 || math.Abs(avgEntryPx-impliedEP) > 0.05) {
+					avgEntryPx = impliedEP
+					totCost = math.Round(shs*impliedEP*100) / 100
+				} else if totCost > 0 {
+					totCost = math.Round(shs*avgEntryPx*100) / 100
+				}
+			}
+
+			retPct := 0.0
+			if totCost > 0 {
+				retPct = math.Round((rpl/totCost)*10000) / 100
+			}
+
+			exDay := dt.Format("2006-01-02")
+			if entryDT.IsZero() {
+				if fallbackEn, ok := entryDateBySymExit[sym+"|"+exDay]; ok {
+					entryDT = fallbackEn.In(cstLocation)
+				}
+			}
+			enDay := ""
+			if !entryDT.IsZero() {
+				enDay = entryDT.In(cstLocation).Format("2006-01-02")
+			}
+
+			exitReason := reasonsBySig[sig]
+			if exitReason == "" && enDay != "" && exDay != "" {
+				exitReason = reasonsBySpan[sym+"|"+enDay+"|"+exDay]
+			}
+			if exitReason == "" && exDay != "" {
+				exitReason = reasonsByExit[sym+"|"+exDay]
+			}
+			if exitReason == "" {
+				exitReason = sig
+			}
+
+			buySignal := buySigBySig[buySigID]
+			if buySignal == "" && enDay != "" {
+				buySignal = buySigBySymDate[sym+"|"+enDay]
+			}
+			if buySignal == "" {
+				buySignal = "Challenger M7d (Intraday T+0) Entry"
+			}
+
+			barsHeld := 0
+			if enDay != "" && exDay != "" {
+				barsHeld = barsBySpan[sym+"|"+enDay+"|"+exDay]
+			}
+			if barsHeld <= 0 {
+				if !entryDT.IsZero() {
+					if enDay == exDay {
+						hoursDiff := dt.Sub(entryDT).Hours()
+						if hoursDiff >= 1.5 {
+							barsHeld = int(math.Round(hoursDiff / 2.5))
+							if barsHeld < 1 {
+								barsHeld = 1
+							} else if barsHeld > 3 {
+								barsHeld = 3
+							}
+						} else {
+							barsHeld = 1
+						}
+					} else {
+						bDays := 0
+						curD := time.Date(entryDT.Year(), entryDT.Month(), entryDT.Day(), 0, 0, 0, 0, cstLocation)
+						endD := time.Date(dt.Year(), dt.Month(), dt.Day(), 0, 0, 0, 0, cstLocation)
+						for curD.Before(endD) {
+							curD = curD.AddDate(0, 0, 1)
+							if curD.Weekday() != time.Saturday && curD.Weekday() != time.Sunday {
+								bDays++
+							}
+						}
+						barsHeld = bDays * 3
+						if barsHeld < 1 {
+							barsHeld = 1
+						}
+					}
+				} else {
+					barsHeld = 3
+				}
+			}
+
+			brokerCycles = append(brokerCycles, &brokerClosedCycle{
+				ID:         t.ID,
+				Symbol:     sym,
+				EntryDate:  entryDT,
+				EntryPrice: avgEntryPx,
+				ExitDate:   dt,
+				ExitPrice:  px,
+				Shares:     shs,
+				Cost:       totCost,
+				PL:         rpl,
+				PLPct:      retPct,
+				BarsHeld:   barsHeld,
+				BuySignal:  buySignal,
+				ExitReason: exitReason,
+				BuySigID:   buySigID,
+				SellSigID:  sig,
+			})
+		}
+	}
+
+	brokerBySymExit := make(map[string][]*brokerClosedCycle)
+	usedBrokerIDs := make(map[int64]bool)
+	for _, bc := range brokerCycles {
+		exDay := bc.ExitDate.In(cstLocation).Format("2006-01-02")
+		key := bc.Symbol + "|" + exDay
+		brokerBySymExit[key] = append(brokerBySymExit[key], bc)
+	}
+
+	var rows []*ClosedLedgerRow
+	weekSet := make(map[string]bool)
+
+	addRow := func(id string, sym string, enDT time.Time, enPx float64, exDT time.Time, exPx float64, shs float64, cost float64, pl float64, plPct float64, buySig string, exRsn string, bars int, isBroker bool) {
+		wk := mondayKeyCST(exDT)
+		if wk == "" {
+			wk = mondayKeyCST(enDT)
+		}
+		if wk != "" {
+			weekSet[wk] = true
+		}
+		if bars <= 0 {
+			bars = 1
+		}
+		rows = append(rows, &ClosedLedgerRow{
+			ID:          id,
+			Symbol:      sym,
+			EntryDate:   formatBarCloseCST(enDT),
+			EntryPrice:  formatFillPrice(enPx),
+			ExitDate:    formatBarCloseCST(exDT),
+			ExitTS:      exDT.Unix(),
+			ExitPrice:   formatFillPrice(exPx),
+			Shares:      shs,
+			Cost:        formatCurrency(cost),
+			PLVal:       pl,
+			PL:          fmt.Sprintf("%+.2f", pl),
+			PLPctVal:    plPct,
+			PLPct:       fmt.Sprintf("%+.2f%%", plPct),
+			EnterReason: formatTradeReason(buySig, sym),
+			ExitReason:  formatTradeReason(exRsn, sym),
+			BarsHeld:    bars,
+			WeekKey:     wk,
+			IsBroker:    isBroker,
+		})
+	}
+
+	if neonMeta != nil && len(neonMeta.ZZTrades) > 0 {
+		for _, bt := range neonMeta.ZZTrades {
+			if !strings.EqualFold(bt.State, "closed") {
+				continue
+			}
+			sym := strings.ToUpper(strings.TrimSpace(bt.Symbol))
+			enDT := bt.EntryDate
+			enPx := bt.EntryPrice
+			exDT := bt.ExitDate
+			exPx := bt.ExitPrice
+			shs := bt.Shares
+			cost := bt.Cost
+			pl := bt.PL
+			plPct := bt.PLPct
+			buySig := bt.BuySignal
+			exRsn := bt.ExitReason
+			bars := bt.BarsHeld
+			isBroker := false
+
+			exDay := ""
+			if !exDT.IsZero() {
+				exDay = exDT.In(cstLocation).Format("2006-01-02")
+			}
+			key := sym + "|" + exDay
+			if matches := brokerBySymExit[key]; len(matches) > 0 {
+				bc := matches[0]
+				brokerBySymExit[key] = matches[1:]
+				usedBrokerIDs[bc.ID] = true
+				isBroker = true
+				if bc.EntryPrice > 0 {
+					enPx = bc.EntryPrice
+				}
+				if bc.ExitPrice > 0 {
+					exPx = bc.ExitPrice
+				}
+				if bc.Shares > 0 {
+					shs = bc.Shares
+				}
+				if bc.Cost > 0 {
+					cost = bc.Cost
+				}
+				pl = bc.PL
+				plPct = bc.PLPct
+				if bc.ExitReason != "" && !strings.HasPrefix(bc.ExitReason, "sig-") {
+					exRsn = bc.ExitReason
+				}
+			}
+
+			addRow(bt.ID, sym, enDT, enPx, exDT, exPx, shs, cost, pl, plPct, buySig, exRsn, bars, isBroker)
+		}
+	}
+
+	// Add any Challenger-only broker closed round-trips (or all broker cycles if Neon was unreachable)
+	for _, bc := range brokerCycles {
+		if usedBrokerIDs[bc.ID] {
+			continue
+		}
+		exRsn := bc.ExitReason
+		if exRsn == "" {
+			exRsn = "Challenger M7d (Intraday T+0) Exit"
+		}
+		addRow(
+			fmt.Sprintf("ch-%d", bc.ID),
+			bc.Symbol,
+			bc.EntryDate,
+			bc.EntryPrice,
+			bc.ExitDate,
+			bc.ExitPrice,
+			bc.Shares,
+			bc.Cost,
+			bc.PL,
+			bc.PLPct,
+			bc.BuySignal,
+			exRsn,
+			bc.BarsHeld,
+			true,
+		)
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].ExitTS == rows[j].ExitTS {
+			return rows[i].Symbol < rows[j].Symbol
+		}
+		return rows[i].ExitTS > rows[j].ExitTS
+	})
+
+	weeks := make([]string, 0, len(weekSet))
+	for wk := range weekSet {
+		weeks = append(weeks, wk)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(weeks)))
+
+	return rows, weeks
+}
+
 // isMarketHours checks if current time in America/Chicago is during an active trading day session
 // (Monday through Friday, 8:15 AM - 3:30 PM CT, excluding major NYSE holidays).
 func isMarketHours() bool {
@@ -132,11 +686,339 @@ func isMarketHours() bool {
 	return currMins >= 495 && currMins <= 930
 }
 
+func renderClosedLedgerRowHTML(r *ClosedLedgerRow) string {
+	plColor := "#94a3b8"
+	if r.PLVal > 0 {
+		plColor = "#34d399"
+	} else if r.PLVal < 0 {
+		plColor = "#f87171"
+	}
+	return fmt.Sprintf(`
+		<tr style="border-bottom: 1px solid #1e293b;">
+			<td style="padding: 9px 12px; font-weight: 700; color: #ffffff; font-size: 13px; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: center; font-family: monospace; font-size: 12px; color: #e2e8f0; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-size: 12px; color: #38bdf8; font-weight: 600; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: center; font-family: monospace; font-size: 12px; color: #e2e8f0; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-size: 12px; color: #34d399; font-weight: 600; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: center; color: #ffffff; font-weight: 600; font-size: 12px; white-space: nowrap;">%g</td>
+			<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-size: 12px; color: #cbd5e1; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-weight: 700; color: %s; font-size: 13px; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-weight: 700; color: %s; font-size: 12px; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; font-size: 12px; color: #cbd5e1; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; font-size: 12px; color: #cbd5e1; white-space: nowrap;">%s</td>
+			<td style="padding: 9px 12px; text-align: center; font-family: monospace; font-size: 12px; color: #94a3b8; white-space: nowrap;">%d</td>
+		</tr>`,
+		html.EscapeString(r.Symbol),
+		html.EscapeString(r.EntryDate),
+		html.EscapeString(r.EntryPrice),
+		html.EscapeString(r.ExitDate),
+		html.EscapeString(r.ExitPrice),
+		r.Shares,
+		html.EscapeString(r.Cost),
+		plColor, html.EscapeString(r.PL),
+		plColor, html.EscapeString(r.PLPct),
+		html.EscapeString(r.EnterReason),
+		html.EscapeString(r.ExitReason),
+		r.BarsHeld,
+	)
+}
+
+func renderClosedLedgerPanel(closedRows []*ClosedLedgerRow, weeks []string) string {
+	defaultSymbols := []string{
+		"DRIP", "FAS", "FAZ", "GUSH", "LABD", "LABU",
+		"SOXL", "SOXS", "SPXL", "SPXS", "TECL", "TECS", "TNA", "TZA",
+	}
+	symSet := make(map[string]bool)
+	for _, s := range defaultSymbols {
+		symSet[s] = true
+	}
+	for _, r := range closedRows {
+		if r.Symbol != "" {
+			symSet[r.Symbol] = true
+		}
+	}
+	symList := make([]string, 0, len(symSet))
+	for s := range symSet {
+		symList = append(symList, s)
+	}
+	sort.Strings(symList)
+
+	var symOptionsHTML strings.Builder
+	symOptionsHTML.WriteString(`<option value="ALL">ALL</option>`)
+	for _, sym := range symList {
+		symOptionsHTML.WriteString(fmt.Sprintf(`<option value="%s">%s</option>`, html.EscapeString(sym), html.EscapeString(sym)))
+	}
+
+	var weekOptionsHTML strings.Builder
+	weekOptionsHTML.WriteString(`<option value="ALL">All Weeks</option>`)
+	weekOptionsHTML.WriteString(`<option value="BROKER_ONLY">Live Broker Fills Only (Post-Bootstrap)</option>`)
+	for idx, wStr := range weeks {
+		label := "Week " + wStr
+		if wDT, err := time.Parse("2006-01-02", wStr); err == nil {
+			wEnd := wDT.AddDate(0, 0, 4)
+			label = fmt.Sprintf("Week of %s - %s", wDT.Format("Jan 02"), wEnd.Format("Jan 02, 2006"))
+			if idx == 0 {
+				label += " (Current Week)"
+			}
+		}
+		weekOptionsHTML.WriteString(fmt.Sprintf(`<option value="%s">%s</option>`, html.EscapeString(wStr), html.EscapeString(label)))
+	}
+
+	var initialRowsHTML strings.Builder
+	if len(closedRows) == 0 {
+		initialRowsHTML.WriteString(`<tr><td colspan="12" style="text-align: center; color: #94a3b8; padding: 22px; font-size: 13px;">No closed trades recorded yet</td></tr>`)
+	} else {
+		limit := 15
+		if len(closedRows) < limit {
+			limit = len(closedRows)
+		}
+		for _, r := range closedRows[:limit] {
+			initialRowsHTML.WriteString(renderClosedLedgerRowHTML(r))
+		}
+	}
+
+	jsonBytes, err := json.Marshal(closedRows)
+	if err != nil || len(closedRows) == 0 {
+		jsonBytes = []byte("[]")
+	}
+
+	endIdx := 15
+	if len(closedRows) < endIdx {
+		endIdx = len(closedRows)
+	}
+	startIdx := 1
+	if len(closedRows) == 0 {
+		startIdx = 0
+	}
+
+	return fmt.Sprintf(`
+		<div class="panel" style="background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+			<div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+				<div>
+					<h2 class="panel-title" style="margin: 0; font-size: 18px; font-weight: 700; color: #ffffff;">Challenger M7d Historical &amp; Live Trade Ledger</h2>
+					<div id="closed-ledger-count" style="font-size: 12px; color: #94a3b8; margin-top: 2px;">Showing %d Challenger M7d closed executions reconciled with Fly.io Paper Broker &bull; All times CST</div>
+				</div>
+				<span style="font-size: 11px; font-weight: 700; color: #a5b4fc; background: #1e1b4b; border: 1px solid #4338ca; padding: 4px 10px; border-radius: 6px;">Closed Trades Ledger</span>
+			</div>
+
+			<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; background: #020617; padding: 14px; border-radius: 12px; border: 1px solid #1e293b; margin-bottom: 14px;">
+				<div style="display: flex; flex-direction: column; gap: 4px;">
+					<label for="ledger-sym-select" style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">Symbol</label>
+					<select id="ledger-sym-select" style="width: 100%%; background: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 700; outline: none; cursor: pointer;">
+						%s
+					</select>
+				</div>
+				<div style="display: flex; flex-direction: column; gap: 4px;">
+					<label for="ledger-week-select" style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">Week</label>
+					<select id="ledger-week-select" style="width: 100%%; background: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 700; outline: none; cursor: pointer;">
+						%s
+					</select>
+				</div>
+			</div>
+
+			<div style="overflow-x: auto; border-radius: 12px; border: 1px solid #1e293b; background: #020617;">
+				<table style="width: 100%%; min-width: 1100px; border-collapse: collapse; text-align: left;">
+					<thead>
+						<tr style="border-bottom: 1px solid #1e293b; background: #090d16;">
+							<th data-sort="symbol" class="ledger-sortable" style="padding: 10px 12px; cursor: pointer; user-select: none; white-space: nowrap;">Symbol <span class="sort-ind"></span></th>
+							<th data-sort="entry_date" class="ledger-sortable" style="padding: 10px 12px; text-align: center; cursor: pointer; user-select: none; white-space: nowrap;">Entry Date (CST) <span class="sort-ind"></span></th>
+							<th style="padding: 10px 12px; text-align: right; white-space: nowrap;">Broker Entry Fill</th>
+							<th data-sort="exit_ts" class="ledger-sortable" style="padding: 10px 12px; text-align: center; cursor: pointer; user-select: none; white-space: nowrap;">Exit Date (CST) <span class="sort-ind">▼</span></th>
+							<th style="padding: 10px 12px; text-align: right; white-space: nowrap;">Broker Exit Fill</th>
+							<th style="padding: 10px 12px; text-align: center; white-space: nowrap;">Shares</th>
+							<th style="padding: 10px 12px; text-align: right; white-space: nowrap;">Broker Cost Basis</th>
+							<th data-sort="pl_val" class="ledger-sortable" style="padding: 10px 12px; text-align: right; cursor: pointer; user-select: none; white-space: nowrap;">Realized P/L ($) <span class="sort-ind"></span></th>
+							<th data-sort="pl_pct_val" class="ledger-sortable" style="padding: 10px 12px; text-align: right; cursor: pointer; user-select: none; white-space: nowrap;">Return %% <span class="sort-ind"></span></th>
+							<th data-sort="enter_reason" class="ledger-sortable" style="padding: 10px 12px; cursor: pointer; user-select: none; white-space: nowrap;">Enter Reason (CST) <span class="sort-ind"></span></th>
+							<th data-sort="exit_reason" class="ledger-sortable" style="padding: 10px 12px; cursor: pointer; user-select: none; white-space: nowrap;">Exit Reason (CST) <span class="sort-ind"></span></th>
+							<th style="padding: 10px 12px; text-align: center; white-space: nowrap;">Held (Bars)</th>
+						</tr>
+					</thead>
+					<tbody id="closed-ledger-tbody">
+						%s
+					</tbody>
+				</table>
+				<div style="display: flex; justify-content: flex-end; align-items: center; gap: 14px; padding: 10px 14px; border-top: 1px solid #1e293b; background: #090d16; font-size: 12px; color: #94a3b8; flex-wrap: wrap;">
+					<div style="display: flex; align-items: center; gap: 6px;">
+						<span>Records per page:</span>
+						<select id="ledger-page-size" style="background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 600;">
+							<option value="15" selected>15</option>
+							<option value="25">25</option>
+							<option value="50">50</option>
+							<option value="100">100</option>
+							<option value="0">All</option>
+						</select>
+					</div>
+					<span id="ledger-page-info">%d-%d of %d</span>
+					<div style="display: flex; align-items: center; gap: 4px;">
+						<button id="ledger-first-btn" type="button" style="background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; font-weight: 700;">|&lt;</button>
+						<button id="ledger-prev-btn" type="button" style="background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; font-weight: 700;">&lt;</button>
+						<button id="ledger-next-btn" type="button" style="background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; font-weight: 700;">&gt;</button>
+						<button id="ledger-last-btn" type="button" style="background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; font-weight: 700;">&gt;|</button>
+					</div>
+				</div>
+			</div>
+		</div>
+		<script>
+		(function() {
+			var allRows = %s;
+			var symSelect = document.getElementById('ledger-sym-select');
+			var weekSelect = document.getElementById('ledger-week-select');
+			var pageSizeSelect = document.getElementById('ledger-page-size');
+			var tbody = document.getElementById('closed-ledger-tbody');
+			var countLabel = document.getElementById('closed-ledger-count');
+			var pageInfo = document.getElementById('ledger-page-info');
+			var firstBtn = document.getElementById('ledger-first-btn');
+			var prevBtn = document.getElementById('ledger-prev-btn');
+			var nextBtn = document.getElementById('ledger-next-btn');
+			var lastBtn = document.getElementById('ledger-last-btn');
+
+			var sortField = 'exit_ts';
+			var sortDesc = true;
+			var currentPage = 1;
+
+			function esc(s) {
+				if (s === null || s === undefined) return '';
+				return String(s)
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/"/g, '&quot;');
+			}
+
+			function getFilteredRows() {
+				var sym = symSelect ? symSelect.value : 'ALL';
+				var wk = weekSelect ? weekSelect.value : 'ALL';
+				var filtered = allRows.filter(function(r) {
+					if (sym !== 'ALL' && r.symbol !== sym) return false;
+					if (wk === 'BROKER_ONLY') return !!r.is_broker;
+					if (wk !== 'ALL' && r.week_key !== wk) return false;
+					return true;
+				});
+				filtered.sort(function(a, b) {
+					var va = a[sortField];
+					var vb = b[sortField];
+					var cmp = 0;
+					if (typeof va === 'number' && typeof vb === 'number') {
+						cmp = va - vb;
+					} else {
+						cmp = String(va || '').localeCompare(String(vb || ''));
+					}
+					if (cmp === 0) {
+						cmp = (b.exit_ts || 0) - (a.exit_ts || 0);
+					}
+					return sortDesc ? -cmp : cmp;
+				});
+				return filtered;
+			}
+
+			function render() {
+				var filtered = getFilteredRows();
+				var total = filtered.length;
+				if (countLabel) {
+					countLabel.innerHTML = 'Showing ' + total + ' Challenger M7d closed executions reconciled with Fly.io Paper Broker &bull; All times CST';
+				}
+				var pageSize = pageSizeSelect ? parseInt(pageSizeSelect.value, 10) : 15;
+				if (!pageSize || pageSize <= 0) pageSize = total || 1;
+				var totalPages = Math.max(1, Math.ceil(total / pageSize));
+				if (currentPage > totalPages) currentPage = totalPages;
+				if (currentPage < 1) currentPage = 1;
+
+				var start = (currentPage - 1) * pageSize;
+				var end = Math.min(start + pageSize, total);
+				var slice = filtered.slice(start, end);
+
+				if (pageInfo) {
+					pageInfo.textContent = (total === 0 ? 0 : start + 1) + '-' + end + ' of ' + total;
+				}
+				if (firstBtn) firstBtn.disabled = currentPage <= 1;
+				if (prevBtn) prevBtn.disabled = currentPage <= 1;
+				if (nextBtn) nextBtn.disabled = currentPage >= totalPages;
+				if (lastBtn) lastBtn.disabled = currentPage >= totalPages;
+
+				if (!tbody) return;
+				if (slice.length === 0) {
+					tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; color: #94a3b8; padding: 22px; font-size: 13px;">No closed trades matching selected filters</td></tr>';
+					return;
+				}
+				var htmlParts = [];
+				for (var i = 0; i < slice.length; i++) {
+					var r = slice[i];
+					var plColor = '#94a3b8';
+					if (r.pl_val > 0) plColor = '#34d399';
+					else if (r.pl_val < 0) plColor = '#f87171';
+					htmlParts.push(
+						'<tr style="border-bottom: 1px solid #1e293b;">' +
+						'<td style="padding: 9px 12px; font-weight: 700; color: #ffffff; font-size: 13px; white-space: nowrap;">' + esc(r.symbol) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: center; font-family: monospace; font-size: 12px; color: #e2e8f0; white-space: nowrap;">' + esc(r.entry_date) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-size: 12px; color: #38bdf8; font-weight: 600; white-space: nowrap;">' + esc(r.entry_price) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: center; font-family: monospace; font-size: 12px; color: #e2e8f0; white-space: nowrap;">' + esc(r.exit_date) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-size: 12px; color: #34d399; font-weight: 600; white-space: nowrap;">' + esc(r.exit_price) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: center; color: #ffffff; font-weight: 600; font-size: 12px; white-space: nowrap;">' + esc(r.shares) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-size: 12px; color: #cbd5e1; white-space: nowrap;">' + esc(r.cost) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-weight: 700; color: ' + plColor + '; font-size: 13px; white-space: nowrap;">' + esc(r.pl) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: right; font-family: monospace; font-weight: 700; color: ' + plColor + '; font-size: 12px; white-space: nowrap;">' + esc(r.pl_pct) + '</td>' +
+						'<td style="padding: 9px 12px; font-size: 12px; color: #cbd5e1; white-space: nowrap;">' + esc(r.enter_reason) + '</td>' +
+						'<td style="padding: 9px 12px; font-size: 12px; color: #cbd5e1; white-space: nowrap;">' + esc(r.exit_reason) + '</td>' +
+						'<td style="padding: 9px 12px; text-align: center; font-family: monospace; font-size: 12px; color: #94a3b8; white-space: nowrap;">' + esc(r.bars_held) + '</td>' +
+						'</tr>'
+					);
+				}
+				tbody.innerHTML = htmlParts.join('');
+			}
+
+			if (symSelect) symSelect.addEventListener('change', function() { currentPage = 1; render(); });
+			if (weekSelect) weekSelect.addEventListener('change', function() { currentPage = 1; render(); });
+			if (pageSizeSelect) pageSizeSelect.addEventListener('change', function() { currentPage = 1; render(); });
+			if (firstBtn) firstBtn.addEventListener('click', function() { currentPage = 1; render(); });
+			if (prevBtn) prevBtn.addEventListener('click', function() { currentPage--; render(); });
+			if (nextBtn) nextBtn.addEventListener('click', function() { currentPage++; render(); });
+			if (lastBtn) lastBtn.addEventListener('click', function() {
+				var filtered = getFilteredRows();
+				var pageSize = pageSizeSelect ? parseInt(pageSizeSelect.value, 10) : 15;
+				if (!pageSize || pageSize <= 0) pageSize = filtered.length || 1;
+				currentPage = Math.max(1, Math.ceil(filtered.length / pageSize));
+				render();
+			});
+
+			var headers = document.querySelectorAll('.ledger-sortable');
+			headers.forEach(function(th) {
+				th.addEventListener('click', function() {
+					var f = th.getAttribute('data-sort');
+					if (!f) return;
+					if (sortField === f) {
+						sortDesc = !sortDesc;
+					} else {
+						sortField = f;
+						sortDesc = true;
+					}
+					headers.forEach(function(h) {
+						var ind = h.querySelector('.sort-ind');
+						if (ind) ind.textContent = '';
+					});
+					var activeInd = th.querySelector('.sort-ind');
+					if (activeInd) activeInd.textContent = sortDesc ? '▼' : '▲';
+					currentPage = 1;
+					render();
+				});
+			});
+		})();
+		</script>`,
+		len(closedRows),
+		symOptionsHTML.String(),
+		weekOptionsHTML.String(),
+		initialRowsHTML.String(),
+		startIdx, endIdx, len(closedRows),
+		string(jsonBytes),
+	)
+}
+
 func (s *Server) renderDashboardHTML(
 	acct *broker.Account,
 	positions []*broker.Position,
 	recent []*journal.ExecutionRecord,
 	trades []*journal.PaperTrade,
+	neonMeta *journal.NeonTradeMetadata,
 ) string {
 	acctNum := s.cfg.AccountNumber
 	if acctNum == "" {
@@ -209,7 +1091,7 @@ func (s *Server) renderDashboardHTML(
 	closedWins := 0
 	closedLosses := 0
 	for _, t := range trades {
-		if t.Action == "SELL" {
+		if t.Action == "SELL" && !isCanceledOrTestSignal(t.SignalID) {
 			if t.RealizedPL > 0 {
 				closedWins++
 			} else if t.RealizedPL < 0 {
@@ -332,50 +1214,9 @@ func (s *Server) renderDashboardHTML(
 		}
 	}
 
-	// Closed Trades HTML
-	closedRowsHTML := ""
-	closedCount := 0
-	for _, t := range trades {
-		if t.Action != "SELL" {
-			continue
-		}
-		closedCount++
-		plColor := "#94a3b8"
-		plDisplay := "$0.00"
-		if t.RealizedPL > 0 {
-			plColor = "#10b981"
-			plDisplay = "+" + formatCurrency(t.RealizedPL)
-		} else if t.RealizedPL < 0 {
-			plColor = "#f87171"
-			plDisplay = formatCurrency(t.RealizedPL)
-		}
-
-		sigID := t.SignalID
-		if sigID == "" {
-			sigID = "-"
-		}
-
-		closedRowsHTML += fmt.Sprintf(`
-		<tr style="border-bottom: 1px solid #1e293b;">
-			<td style="padding: 10px 14px; font-weight: 700; color: #ffffff; font-size: 14px;">%s</td>
-			<td style="padding: 10px 14px; font-weight: 700; color: #fb7185; font-size: 13px;">SELL</td>
-			<td style="padding: 10px 14px; text-align: right; color: #ffffff; font-weight: 600;">%g</td>
-			<td style="padding: 10px 14px; text-align: right; color: #34d399; font-weight: 700;">$%.2f</td>
-			<td style="padding: 10px 14px; text-align: right; font-weight: 700; color: %s; font-size: 14px;">%s</td>
-			<td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #94a3b8;">%s</td>
-			<td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #38bdf8;">%s</td>
-		</tr>`,
-			t.Symbol,
-			t.Shares,
-			t.Price,
-			plColor, plDisplay,
-			sigID,
-			formatCST(t.Timestamp),
-		)
-	}
-	if closedCount == 0 {
-		closedRowsHTML = `<tr><td colspan="7" style="text-align: center; color: #94a3b8; padding: 22px; font-size: 13px;">No closed trades recorded yet</td></tr>`
-	}
+	// Closed Trades Ledger Panel HTML (mirrors Challenger M7d Historical & Live Trade Ledger without State dropdown)
+	closedLedgerRows, closedWeeks := buildClosedTradeLedger(trades, neonMeta)
+	closedLedgerPanelHTML := renderClosedLedgerPanel(closedLedgerRows, closedWeeks)
 
 	webhookStatus := "Configured"
 	webhookColor := "#10b981"
@@ -574,30 +1415,7 @@ func (s *Server) renderDashboardHTML(
 			</div>
 		</div>
 
-		<div class="panel">
-			<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
-				<h2 class="panel-title" style="margin: 0;">Recent Closed Trades (%d Closed Fills)</h2>
-				<span style="font-size: 12px; font-weight: 600; color: #94a3b8;">Authoritative live broker exit fills</span>
-			</div>
-			<div style="overflow-x: auto;">
-				<table>
-					<thead>
-						<tr>
-							<th>Symbol</th>
-							<th>Action</th>
-							<th style="text-align: right;">Shares</th>
-							<th style="text-align: right;">Live Broker Exit Fill</th>
-							<th style="text-align: right;">Realized Profit / Loss</th>
-							<th>Signal ID</th>
-							<th>Closed At (CST)</th>
-						</tr>
-					</thead>
-					<tbody>
-						%s
-					</tbody>
-				</table>
-			</div>
-		</div>
+		%s
 
 		<div class="panel">
 			<h2 class="panel-title">Recent Execution Journal</h2>
@@ -663,7 +1481,7 @@ func (s *Server) renderDashboardHTML(
 		realizedClass, realizedStr, realizedColor, winRateStr,
 		plClass, plStr, realizedColor, realizedStr, unrealizedColor, unrealizedStr,
 		len(positions), lastUpdatedStr, posRowsHTML,
-		closedCount, closedRowsHTML,
+		closedLedgerPanelHTML,
 		execRowsHTML,
 	)
 }
@@ -784,7 +1602,14 @@ func (s *Server) handleTrades(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	trades, err := s.journal.SQLite().GetRecentTrades(ctx, 50)
+	limit := 500
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	trades, err := s.journal.SQLite().GetRecentTrades(ctx, limit)
 	if err != nil {
 		s.writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":   "database_error",
