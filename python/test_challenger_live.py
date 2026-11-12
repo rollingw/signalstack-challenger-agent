@@ -59,7 +59,6 @@ def run_live_test():
     assert meta.get("service") == "SignalStack Challenger Trading Agent", f"Unexpected service: {meta.get('service')}"
     assert meta.get("model") == "Model 5 (Linear Green Hold & Symmetric Dual-Hybrid)", f"Unexpected model: {meta.get('model')}"
     assert meta.get("role") == "challenger", f"Unexpected role: {meta.get('role')}"
-    assert meta.get("champion_url") == "https://signalstack-trading-agent.fly.dev"
     log(f"PASS: Service identified as {meta['service']} ({meta['model']})", "✅")
     passed += 1
 

@@ -1,6 +1,9 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,5 +150,88 @@ func TestBuildClosedTradeLedgerAndDashboardHTML(t *testing.T) {
 	}
 	if strings.Contains(htmlOut, `label="State"`) || strings.Contains(htmlOut, `>State<`) {
 		t.Errorf("dashboard HTML should not contain open/closed State dropdown or column")
+	}
+}
+
+func TestDashboardLoginGateAndSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_auth.db")
+	sqliteJ, err := journal.NewSQLiteJournal(dbPath, 100000.0, 2.0, "2026-09-28")
+	if err != nil {
+		t.Fatalf("failed to create sqlite journal: %v", err)
+	}
+	defer sqliteJ.Close()
+
+	multiJ := journal.NewMultiJournal(sqliteJ, nil, nil)
+	cfg := &config.Config{
+		Port:              "8080",
+		AccountNumber:     "PA3HW1A38DR2",
+		ServiceName:       "SignalStack Challenger Trading Agent",
+		SignalSecret:      "test-secret",
+		DashboardUsername: "rollingw",
+		DashboardPassword: "arcamax1",
+	}
+	ssBroker := broker.NewSignalStackBroker("", "", "close", true, sqliteJ)
+	srv := NewServer(cfg, ssBroker, multiJ)
+
+	// 1. Unauthenticated browser request to GET / redirects to /login
+	reqRoot := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqRoot.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rrRoot := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrRoot, reqRoot)
+	if rrRoot.Code != http.StatusSeeOther || rrRoot.Header().Get("Location") != "/login" {
+		t.Fatalf("expected 303 redirect to /login, got %d (%s)", rrRoot.Code, rrRoot.Header().Get("Location"))
+	}
+
+	// 2. Invalid credentials redirect to /login?error=1
+	badForm := url.Values{"username": {"rollingw"}, "password": {"wrongpw"}}
+	reqBad := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(badForm.Encode()))
+	reqBad.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rrBad := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrBad, reqBad)
+	if rrBad.Code != http.StatusSeeOther || rrBad.Header().Get("Location") != "/login?error=1" {
+		t.Fatalf("expected 303 redirect to /login?error=1, got %d (%s)", rrBad.Code, rrBad.Header().Get("Location"))
+	}
+
+	// 3. Valid credentials (rollingw / arcamax1) set session cookie and redirect to /
+	goodForm := url.Values{"username": {"rollingw"}, "password": {"arcamax1"}}
+	reqGood := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(goodForm.Encode()))
+	reqGood.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rrGood := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrGood, reqGood)
+	if rrGood.Code != http.StatusSeeOther || rrGood.Header().Get("Location") != "/" {
+		t.Fatalf("expected 303 redirect to /, got %d (%s)", rrGood.Code, rrGood.Header().Get("Location"))
+	}
+	cookies := rrGood.Result().Cookies()
+	var sessCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == dashboardSessionCookie {
+			sessCookie = c
+			break
+		}
+	}
+	if sessCookie == nil || sessCookie.Value == "" {
+		t.Fatalf("expected session cookie %q to be set", dashboardSessionCookie)
+	}
+
+	// 4. Authenticated browser request to GET / returns 200 dashboard HTML
+	reqAuthed := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqAuthed.Header.Set("Accept", "text/html")
+	reqAuthed.AddCookie(sessCookie)
+	rrAuthed := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrAuthed, reqAuthed)
+	if rrAuthed.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for authenticated GET /, got %d", rrAuthed.Code)
+	}
+	if !strings.Contains(rrAuthed.Body.String(), "SignalStack Challenger Trading Agent") || !strings.Contains(rrAuthed.Body.String(), "Logout") {
+		t.Fatalf("authenticated dashboard HTML missing expected content")
+	}
+
+	// 5. Logout clears session cookie and redirects to /login
+	reqLogout := httptest.NewRequest(http.MethodGet, "/logout", nil)
+	rrLogout := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrLogout, reqLogout)
+	if rrLogout.Code != http.StatusSeeOther || rrLogout.Header().Get("Location") != "/login" {
+		t.Fatalf("expected 303 redirect to /login on logout, got %d", rrLogout.Code)
 	}
 }

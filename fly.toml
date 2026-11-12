@@ -11,7 +11,6 @@ primary_region = "ord"
   SERVICE_NAME = "SignalStack Challenger Trading Agent"
   ACCOUNT_NUMBER = "PA3HW1A38DR2"
   AGENT_ROLE = "Challenger M7d (Intraday T+0 • Same-Day Buys & Sells)"
-  CHAMPION_URL = "https://signalstack-trading-agent.fly.dev"
   SIGNALSTACK_WEBHOOK_URL = ""
   SIGNALSTACK_EXIT_ACTION = "close"
   INITIAL_CAPITAL = "100000"
@@ -21,6 +20,8 @@ primary_region = "ord"
   MAX_ORDER_VALUE = "50000"
   MAX_SHARES_PER_ORDER = "5000"
   ORDER_TIMEOUT_SEC = "15"
+  DASHBOARD_USERNAME = "rollingw"
+  DASHBOARD_PASSWORD = "arcamax1"
 
 [http_service]
   internal_port = 8080

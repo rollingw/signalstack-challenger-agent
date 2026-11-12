@@ -15,10 +15,14 @@ var symbolRegex = regexp.MustCompile(`^[A-Za-z0-9\.\-\_]{1,16}$`)
 // PairMap maps each Direxion Bull/Bear 3x/2x ETF to its inverse partner.
 // Holding both sides of the same pair simultaneously is strictly prohibited.
 var PairMap = map[string]string{
+	"ERX":  "ERY",
+	"ERY":  "ERX",
 	"FAS":  "FAZ",
 	"FAZ":  "FAS",
 	"GUSH": "DRIP",
 	"DRIP": "GUSH",
+	"JNUG": "JDST",
+	"JDST": "JNUG",
 	"LABU": "LABD",
 	"LABD": "LABU",
 	"SOXL": "SOXS",

@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -12,6 +16,8 @@ import (
 	"github.com/rollingw/signalstack-agent/internal/config"
 	"github.com/rollingw/signalstack-agent/internal/journal"
 )
+
+const dashboardSessionCookie = "challenger_session"
 
 type Server struct {
 	cfg        *config.Config
@@ -29,6 +35,11 @@ func NewServer(cfg *config.Config, b *broker.SignalStackBroker, j *journal.Multi
 	}
 
 	mux := http.NewServeMux()
+
+	// Dashboard auth endpoints
+	mux.HandleFunc("GET /login", s.handleLoginGet)
+	mux.HandleFunc("POST /login", s.handleLoginPost)
+	mux.HandleFunc("GET /logout", s.handleLogout)
 
 	// Public inspection endpoints
 	mux.HandleFunc("GET /", s.handleRoot)
@@ -99,6 +110,66 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
+}
+
+func (s *Server) dashboardExpectedUser() string {
+	if s.cfg != nil && strings.TrimSpace(s.cfg.DashboardUsername) != "" {
+		return strings.TrimSpace(s.cfg.DashboardUsername)
+	}
+	return "rollingw"
+}
+
+func (s *Server) dashboardExpectedPass() string {
+	if s.cfg != nil && strings.TrimSpace(s.cfg.DashboardPassword) != "" {
+		return strings.TrimSpace(s.cfg.DashboardPassword)
+	}
+	return "arcamax1"
+}
+
+func (s *Server) computeSessionToken(username string) string {
+	secret := "challenger-dashboard-session-secret-2026"
+	if s.cfg != nil && s.cfg.SignalSecret != "" {
+		secret = s.cfg.SignalSecret
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(username + ":" + s.dashboardExpectedPass()))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) verifyDashboardCredentials(username, password string) bool {
+	u := strings.TrimSpace(username)
+	expU := s.dashboardExpectedUser()
+	expP := s.dashboardExpectedPass()
+	uMatch := subtle.ConstantTimeCompare([]byte(u), []byte(expU)) == 1
+	pMatch := subtle.ConstantTimeCompare([]byte(password), []byte(expP)) == 1
+	return uMatch && pMatch
+}
+
+func (s *Server) isDashboardAuthenticated(r *http.Request) bool {
+	expUser := s.dashboardExpectedUser()
+	expToken := s.computeSessionToken(expUser)
+
+	if c, err := r.Cookie(dashboardSessionCookie); err == nil && c.Value != "" {
+		if subtle.ConstantTimeCompare([]byte(c.Value), []byte(expToken)) == 1 {
+			return true
+		}
+	}
+
+	if u, p, ok := r.BasicAuth(); ok {
+		if s.verifyDashboardCredentials(u, p) {
+			return true
+		}
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") && s.cfg != nil && s.cfg.SignalSecret != "" {
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.SignalSecret)) == 1 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, statusCode int, data any) {

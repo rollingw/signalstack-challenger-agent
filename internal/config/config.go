@@ -30,10 +30,11 @@ type Config struct {
 	AccountNumber           string
 	AccountID               string
 	AgentRole               string
-	ChampionURL             string
 	AlpacaAPIKey            string
 	AlpacaSecretKey         string
 	AlpacaBaseURL           string
+	DashboardUsername       string
+	DashboardPassword       string
 }
 
 // LoadFromEnv loads configuration from environment variables with safe defaults.
@@ -61,10 +62,11 @@ func LoadFromEnv() *Config {
 	accountNum := getEnv("ACCOUNT_NUMBER", "PA3HW1A38DR2")
 	accountID := getEnv("ACCOUNT_ID", "678a607c-193f-407a-aa27-e5dd864db293")
 	agentRole := getEnv("AGENT_ROLE", "Challenger M7d (Intraday T+0 • Same-Day Buys & Sells)")
-	championURL := getEnv("CHAMPION_URL", "https://signalstack-trading-agent.fly.dev")
 	alpacaKey := getEnv("ALPACA_API_KEY", getEnv("CHALLENGER_ALPACA_API_KEY", ""))
 	alpacaSecret := getEnv("ALPACA_SECRET_KEY", getEnv("CHALLENGER_ALPACA_SECRET_KEY", ""))
 	alpacaBaseURL := getEnv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+	dashboardUser := getEnv("DASHBOARD_USERNAME", "rollingw")
+	dashboardPass := getEnv("DASHBOARD_PASSWORD", "arcamax1")
 
 	return &Config{
 		Port:                    port,
@@ -88,10 +90,11 @@ func LoadFromEnv() *Config {
 		AccountNumber:           accountNum,
 		AccountID:               accountID,
 		AgentRole:               agentRole,
-		ChampionURL:             championURL,
 		AlpacaAPIKey:            alpacaKey,
 		AlpacaSecretKey:         alpacaSecret,
 		AlpacaBaseURL:           alpacaBaseURL,
+		DashboardUsername:       dashboardUser,
+		DashboardPassword:       dashboardPass,
 	}
 }
 

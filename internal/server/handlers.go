@@ -35,7 +35,222 @@ func isCanceledOrTestSignal(sigID string) bool {
 	return canceledChallengerSignalIDs[s] || strings.HasPrefix(s, "sig-test-")
 }
 
+func (s *Server) handleLoginGet(w http.ResponseWriter, r *http.Request) {
+	if s.isDashboardAuthenticated(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	hasErr := r.URL.Query().Get("error") != ""
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, s.renderLoginHTML(hasErr))
+}
+
+func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
+		return
+	}
+	username := strings.TrimSpace(r.FormValue("username"))
+	password := r.FormValue("password")
+
+	if !s.verifyDashboardCredentials(username, password) {
+		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
+		return
+	}
+
+	token := s.computeSessionToken(s.dashboardExpectedUser())
+	http.SetCookie(w, &http.Cookie{
+		Name:     dashboardSessionCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400 * 30,
+	})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     dashboardSessionCookie,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+func (s *Server) renderLoginHTML(hasError bool) string {
+	errorBanner := ""
+	if hasError {
+		errorBanner = `<div style="margin-bottom: 16px; padding: 12px; border-radius: 10px; background: rgba(127, 29, 29, 0.45); border: 1px solid #991b1b; color: #fca5a5; font-size: 12px; font-weight: 600; text-align: center;">Invalid username or password. Please verify credentials.</div>`
+	}
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+	<title>Login | SignalStack Challenger Trading Agent</title>
+	<style>
+		* { box-sizing: border-box; }
+		body {
+			background-color: #0b0f19;
+			color: #f1f5f9;
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+			margin: 0;
+			min-height: 100vh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 20px;
+		}
+		.login-card {
+			width: 100%%;
+			max-width: 420px;
+			background: #111827;
+			border: 1px solid #312e81;
+			border-radius: 16px;
+			padding: 32px 28px;
+			box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+		}
+		.icon-circle {
+			width: 54px;
+			height: 54px;
+			border-radius: 9999px;
+			background: #1e1b4b;
+			border: 1px solid rgba(99, 102, 241, 0.5);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			margin: 0 auto 12px auto;
+			font-size: 24px;
+		}
+		.title {
+			font-size: 19px;
+			font-weight: 800;
+			color: #ffffff;
+			text-align: center;
+			margin: 0;
+			letter-spacing: 0.03em;
+		}
+		.subtitle {
+			font-size: 12px;
+			color: #a5b4fc;
+			text-align: center;
+			margin: 6px 0 14px 0;
+			font-weight: 600;
+		}
+		.badge {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			background: #030712;
+			color: #a5b4fc;
+			border: 1px solid rgba(99, 102, 241, 0.35);
+			padding: 4px 12px;
+			border-radius: 9999px;
+			font-size: 11px;
+			font-weight: 600;
+		}
+		.dot {
+			width: 8px;
+			height: 8px;
+			border-radius: 9999px;
+			background: #818cf8;
+		}
+		label {
+			display: block;
+			font-size: 11px;
+			font-weight: 700;
+			color: #cbd5e1;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			margin-bottom: 6px;
+		}
+		input[type="text"], input[type="password"] {
+			width: 100%%;
+			background: #030712;
+			border: 1px solid #1e293b;
+			border-radius: 10px;
+			padding: 11px 14px;
+			font-size: 14px;
+			color: #f8fafc;
+			outline: none;
+			transition: border-color 0.15s;
+		}
+		input[type="text"]:focus, input[type="password"]:focus {
+			border-color: #6366f1;
+		}
+		.field { margin-bottom: 16px; }
+		.btn {
+			width: 100%%;
+			background: #4f46e5;
+			color: #ffffff;
+			border: none;
+			border-radius: 10px;
+			padding: 12px 16px;
+			font-size: 14px;
+			font-weight: 700;
+			cursor: pointer;
+			margin-top: 6px;
+			transition: background 0.15s;
+		}
+		.btn:hover { background: #6366f1; }
+		.footer {
+			text-align: center;
+			font-size: 11px;
+			color: #64748b;
+			margin-top: 22px;
+			padding-top: 16px;
+			border-top: 1px solid #1f2937;
+		}
+	</style>
+</head>
+<body>
+	<div class="login-card">
+		<div style="text-align: center; margin-bottom: 24px;">
+			<div class="icon-circle">⚡</div>
+			<h1 class="title">SIGNALSTACK CHALLENGER</h1>
+			<p class="subtitle">Model 5 (Linear Green Hold &amp; Symmetric Dual-Hybrid)</p>
+			<div class="badge">
+				<span class="dot"></span>
+				<span>Fly.io Paper Broker &bull; Protected Dashboard</span>
+			</div>
+		</div>
+		%s
+		<form method="POST" action="/login">
+			<div class="field">
+				<label for="username">Username</label>
+				<input type="text" id="username" name="username" required autofocus autocomplete="username" placeholder="Enter username" />
+			</div>
+			<div class="field">
+				<label for="password">Password</label>
+				<input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter password" />
+			</div>
+			<button type="submit" class="btn">Sign In to Challenger Agent</button>
+		</form>
+		<div class="footer">
+			SignalStack Challenger Trading Agent &bull; Authorized Access Only
+		</div>
+	</div>
+</body>
+</html>`, errorBanner)
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if strings.Contains(r.Header.Get("Accept"), "text/html") && !s.isDashboardAuthenticated(r) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
@@ -60,7 +275,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"model":             "Model 5 (Linear Green Hold & Symmetric Dual-Hybrid)",
 		"role":              "challenger",
 		"status":            "running",
-		"champion_url":      s.cfg.ChampionURL,
 		"broker":            s.broker.Name(),
 		"bootstrap_mode":    s.broker.BootstrapMode(),
 		"account":           acct,
@@ -725,7 +939,7 @@ func renderClosedLedgerRowHTML(r *ClosedLedgerRow) string {
 
 func renderClosedLedgerPanel(closedRows []*ClosedLedgerRow, weeks []string) string {
 	defaultSymbols := []string{
-		"DRIP", "FAS", "FAZ", "GUSH", "LABD", "LABU",
+		"DRIP", "ERX", "ERY", "FAS", "FAZ", "GUSH", "JDST", "JNUG", "LABD", "LABU",
 		"SOXL", "SOXS", "SPXL", "SPXS", "TECL", "TECS", "TNA", "TZA",
 	}
 	symSet := make(map[string]bool)
@@ -1336,13 +1550,14 @@ func (s *Server) renderDashboardHTML(
 		<div class="header">
 			<div>
 				<h1 class="app-title">⚡ SignalStack Challenger Trading Agent</h1>
-				<p class="app-subtitle">Model 5 (Linear Green Hold & Symmetric Dual-Hybrid) Shadow Gateway &bull; Broker: <span class="pill">%s</span> &bull; Webhook: <span style="color: %s; font-weight: 600;">%s</span> &bull; <span style="color: #a5b4fc; font-weight: 700;">Last Updated: %s</span> &bull; %s</p>
+				<p class="app-subtitle">Model 5 (Linear Green Hold & Symmetric Dual-Hybrid) Execution Gateway &bull; Broker: <span class="pill">%s</span> &bull; Webhook: <span style="color: %s; font-weight: 600;">%s</span> &bull; <span style="color: #a5b4fc; font-weight: 700;">Last Updated: %s</span> &bull; %s</p>
 			</div>
 			<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
 				<span style="display: inline-flex; align-items: center; gap: 6px; background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(129, 140, 248, 0.5); color: #c7d2fe; padding: 6px 14px; border-radius: 9999px; font-size: 12px; font-weight: 700;">🏆 CHALLENGER MODEL 5 &bull; LINEAR GREEN HOLD &amp; SYMMETRIC DUAL-HYBRID</span>
 				<div style="display: flex; align-items: center; gap: 8px;">
 					<span class="bootstrap-badge">🚀 BOOTSTRAP ACTIVE</span>
-					<a href="https://signalstack-trading-agent.fly.dev" target="_blank" style="text-decoration:none; color: #a5b4fc; background: #312e81; border: 1px solid #6366f1; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">↗️ View Champion Agent</a>
+					<span style="color: #c7d2fe; background: #1e293b; border: 1px solid #334155; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">👤 %s</span>
+					<a href="/logout" style="text-decoration:none; color: #fca5a5; background: rgba(127, 29, 29, 0.45); border: 1px solid #991b1b; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">Logout</a>
 				</div>
 				<span style="font-size: 11px; color: #94a3b8; font-family: monospace;">Times: Central Time (CST/CDT)</span>
 			</div>
@@ -1476,6 +1691,7 @@ func (s *Server) renderDashboardHTML(
 </html>`,
 		refreshMetaTag,
 		s.broker.Name(), webhookColor, webhookStatus, lastUpdatedStr, refreshStatusHTML,
+		html.EscapeString(s.dashboardExpectedUser()),
 		acctNum, acctStatus, buyingPowerStr, cashStr, equityStr,
 		dayPLClass, dayPLStr, len(positions),
 		realizedClass, realizedStr, realizedColor, winRateStr,
