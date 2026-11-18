@@ -757,14 +757,37 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 			`, o.OrderID, o.ClientOrderID, o.ClientOrderID).Scan(&execID, &execSigID)
 			if err == nil && execID > 0 {
 				matched = true
-				_, _ = tx.ExecContext(ctx, `
-					UPDATE execution_journal
-					SET fill_price = ?, status = 'filled'
-					WHERE id = ?;
-				`, o.FillPrice, execID)
+				if o.Shares > 0 {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE execution_journal
+						SET fill_price = ?,
+						    filled_shares = ?,
+						    requested_shares = CASE WHEN requested_shares < ? THEN ? ELSE requested_shares END,
+						    status = 'filled'
+						WHERE id = ?;
+					`, o.FillPrice, o.Shares, o.Shares, o.Shares, execID)
+				} else {
+					_, _ = tx.ExecContext(ctx, `
+						UPDATE execution_journal
+						SET fill_price = ?, status = 'filled'
+						WHERE id = ?;
+					`, o.FillPrice, execID)
+				}
 
 				if execSigID != "" {
-					if o.RealizedPL != nil {
+					if o.Shares > 0 && o.RealizedPL != nil {
+						_, _ = tx.ExecContext(ctx, `
+							UPDATE paper_trades
+							SET shares = ?, price = ?, realized_pl = ?
+							WHERE signal_id = ?;
+						`, o.Shares, o.FillPrice, *o.RealizedPL, execSigID)
+					} else if o.Shares > 0 {
+						_, _ = tx.ExecContext(ctx, `
+							UPDATE paper_trades
+							SET shares = ?, price = ?
+							WHERE signal_id = ?;
+						`, o.Shares, o.FillPrice, execSigID)
+					} else if o.RealizedPL != nil {
 						_, _ = tx.ExecContext(ctx, `
 							UPDATE paper_trades
 							SET price = ?, realized_pl = ?

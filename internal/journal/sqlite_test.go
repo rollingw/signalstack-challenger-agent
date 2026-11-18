@@ -234,3 +234,64 @@ func TestReconcileOrderFillsAndClosedTrades(t *testing.T) {
 		t.Errorf("expected account Equity ~100041.07, got %f", acct.Equity)
 	}
 }
+
+func TestReconcilePartialShareFillUpdatesJournalAndTrades(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test_partial_fills.db")
+
+	j, err := NewSQLiteJournal(dbPath, 100000.0, 2.0, "2026-09-28")
+	if err != nil {
+		t.Fatalf("failed to create sqlite journal: %v", err)
+	}
+	defer j.Close()
+
+	_ = j.ApplyBuy(ctx, "DRIP", 62, 35.655001, "sig-buy-DRIP-202611161100-62")
+	// Simulate partial tranche recorded initially (15 sh instead of 62 sh)
+	_, _ = j.ApplySell(ctx, "DRIP", 15, 36.52, "sig-exit-ch-DRIP-202611171100-62")
+	_ = j.RecordExecution(ctx, &ExecutionRecord{
+		SignalID:        "sig-exit-ch-DRIP-202611171100-62",
+		Broker:          "alpaca_paper",
+		OrderID:         "ss-123",
+		ClientOrderID:   "sig-exit-ch-DRIP-202611171100-62",
+		Symbol:          "DRIP",
+		Action:          "SELL",
+		RequestedShares: 15,
+		FilledShares:    15,
+		SignalPrice:     36.52,
+		FillPrice:       36.52,
+		Status:          "filled",
+	})
+
+	rpl := 53.16
+	orders := []*broker.ReconcileOrderFillItem{
+		{
+			Symbol:        "DRIP",
+			Action:        "SELL",
+			Shares:        62,
+			FillPrice:     36.512419,
+			ClientOrderID: "sig-exit-ch-DRIP-202611171100-62",
+			RealizedPL:    &rpl,
+		},
+	}
+
+	if err := j.ReconcilePositions(ctx, nil, orders, 100053.16, false); err != nil {
+		t.Fatalf("ReconcilePositions failed: %v", err)
+	}
+
+	trades, _ := j.GetRecentTrades(ctx, 10)
+	var sellTr *PaperTrade
+	for _, tr := range trades {
+		if tr.Symbol == "DRIP" && tr.Action == "SELL" {
+			sellTr = tr
+		}
+	}
+	if sellTr == nil || sellTr.Shares != 62 {
+		t.Fatalf("expected DRIP SELL shares=62, got %+v", sellTr)
+	}
+
+	execs, _ := j.GetRecentExecutions(ctx, 5)
+	if len(execs) == 0 || execs[0].FilledShares != 62 || execs[0].RequestedShares != 62 {
+		t.Fatalf("expected execution_journal shares=62/62, got %+v", execs)
+	}
+}
+
