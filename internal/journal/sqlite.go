@@ -125,6 +125,51 @@ func NewSQLiteJournal(dbPath string, initialCapital float64, marginMultiplier fl
 		signal_id TEXT,
 		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TABLE IF NOT EXISTS position_zero_lines (
+		active_symbol TEXT PRIMARY KEY,
+		pair_key TEXT NOT NULL,
+		entry_signal_id TEXT DEFAULT '',
+		partner_symbol TEXT NOT NULL,
+		armed_date TEXT DEFAULT '',
+		pivot_label TEXT DEFAULT '',
+		active_zero_price REAL DEFAULT 0,
+		partner_zero_price REAL DEFAULT 0,
+		active_entry_price REAL DEFAULT 0,
+		partner_entry_price REAL DEFAULT 0,
+		active_live_price REAL DEFAULT 0,
+		partner_live_price REAL DEFAULT 0,
+		active_vs_zero_pct REAL DEFAULT 0,
+		partner_vs_zero_pct REAL DEFAULT 0,
+		active_linear_state TEXT DEFAULT '',
+		partner_linear_state TEXT DEFAULT '',
+		flip_count INTEGER DEFAULT 0,
+		zero_line_status TEXT DEFAULT 'ABOVE_ZERO',
+		state TEXT DEFAULT 'OPEN',
+		repaint_count INTEGER DEFAULT 0,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS position_repaints (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		pair_key TEXT NOT NULL,
+		symbol TEXT NOT NULL,
+		partner_symbol TEXT NOT NULL,
+		bar_date TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		orig_pivot_price REAL DEFAULT 0,
+		new_repaint_price REAL DEFAULT 0,
+		active_live_price REAL DEFAULT 0,
+		partner_live_price REAL DEFAULT 0,
+		active_vs_zero_pct REAL DEFAULT 0,
+		partner_vs_zero_pct REAL DEFAULT 0,
+		partner_linear_state TEXT DEFAULT '',
+		action_taken TEXT DEFAULT 'HOLD',
+		note TEXT DEFAULT '',
+		detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(pair_key, symbol, bar_date, event_type)
+	);
+	CREATE INDEX IF NOT EXISTS idx_pos_repaints_detected ON position_repaints(detected_at DESC);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -1039,4 +1084,205 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 	}
 
 	return tx.Commit()
+}
+
+// SyncZeroLinesAndRepaints upserts active zero-line pair anchors and appends
+// deduplicated position repaint / zero-line breach events into SQLite.
+func (s *SQLiteJournal) SyncZeroLinesAndRepaints(
+	ctx context.Context,
+	zeroLines []*PositionZeroLine,
+	repaints []*PositionRepaint,
+	replaceOpen bool,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin zero-line sync tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	activeSyms := make(map[string]bool)
+
+	for _, zl := range zeroLines {
+		if zl == nil || strings.TrimSpace(zl.ActiveSymbol) == "" {
+			continue
+		}
+		sym := strings.ToUpper(strings.TrimSpace(zl.ActiveSymbol))
+		psym := strings.ToUpper(strings.TrimSpace(zl.PartnerSymbol))
+		activeSyms[sym] = true
+		upd := zl.UpdatedAt
+		if upd.IsZero() {
+			upd = now
+		}
+		state := strings.ToUpper(strings.TrimSpace(zl.State))
+		if state == "" {
+			state = "OPEN"
+		}
+		status := strings.ToUpper(strings.TrimSpace(zl.ZeroLineStatus))
+		if status == "" {
+			status = "ABOVE_ZERO"
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO position_zero_lines (
+				active_symbol, pair_key, entry_signal_id, partner_symbol, armed_date, pivot_label,
+				active_zero_price, partner_zero_price, active_entry_price, partner_entry_price,
+				active_live_price, partner_live_price, active_vs_zero_pct, partner_vs_zero_pct,
+				active_linear_state, partner_linear_state, flip_count, zero_line_status,
+				state, repaint_count, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(active_symbol) DO UPDATE SET
+				pair_key = excluded.pair_key,
+				entry_signal_id = CASE WHEN excluded.entry_signal_id != '' THEN excluded.entry_signal_id ELSE position_zero_lines.entry_signal_id END,
+				partner_symbol = excluded.partner_symbol,
+				armed_date = CASE WHEN excluded.armed_date != '' THEN excluded.armed_date ELSE position_zero_lines.armed_date END,
+				pivot_label = CASE WHEN excluded.pivot_label != '' THEN excluded.pivot_label ELSE position_zero_lines.pivot_label END,
+				active_zero_price = CASE WHEN excluded.active_zero_price > 0 THEN excluded.active_zero_price ELSE position_zero_lines.active_zero_price END,
+				partner_zero_price = CASE WHEN excluded.partner_zero_price > 0 THEN excluded.partner_zero_price ELSE position_zero_lines.partner_zero_price END,
+				active_entry_price = CASE WHEN excluded.active_entry_price > 0 THEN excluded.active_entry_price ELSE position_zero_lines.active_entry_price END,
+				partner_entry_price = CASE WHEN excluded.partner_entry_price > 0 THEN excluded.partner_entry_price ELSE position_zero_lines.partner_entry_price END,
+				active_live_price = excluded.active_live_price,
+				partner_live_price = excluded.partner_live_price,
+				active_vs_zero_pct = excluded.active_vs_zero_pct,
+				partner_vs_zero_pct = excluded.partner_vs_zero_pct,
+				active_linear_state = excluded.active_linear_state,
+				partner_linear_state = excluded.partner_linear_state,
+				flip_count = excluded.flip_count,
+				zero_line_status = excluded.zero_line_status,
+				state = excluded.state,
+				repaint_count = excluded.repaint_count,
+				updated_at = excluded.updated_at;
+		`,
+			sym, zl.PairKey, zl.EntrySignalID, psym, zl.ArmedDate, zl.PivotLabel,
+			zl.ActiveZeroPrice, zl.PartnerZeroPrice, zl.ActiveEntryPrice, zl.PartnerEntryPrice,
+			zl.ActiveLivePrice, zl.PartnerLivePrice, zl.ActiveVsZeroPct, zl.PartnerVsZeroPct,
+			zl.ActiveLinearState, zl.PartnerLinearState, zl.FlipCount, status,
+			state, zl.RepaintCount, upd,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to upsert zero line for %s: %w", sym, err)
+		}
+	}
+
+	if replaceOpen {
+		rows, err := tx.QueryContext(ctx, `SELECT active_symbol FROM position_zero_lines;`)
+		if err == nil {
+			var stale []string
+			for rows.Next() {
+				var sSym string
+				if rows.Scan(&sSym) == nil && !activeSyms[sSym] {
+					stale = append(stale, sSym)
+				}
+			}
+			rows.Close()
+			for _, sSym := range stale {
+				_, _ = tx.ExecContext(ctx, `DELETE FROM position_zero_lines WHERE active_symbol = ?;`, sSym)
+			}
+		}
+	}
+
+	for _, rp := range repaints {
+		if rp == nil || strings.TrimSpace(rp.Symbol) == "" || strings.TrimSpace(rp.BarDate) == "" {
+			continue
+		}
+		det := rp.DetectedAt
+		if det.IsZero() {
+			det = now
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO position_repaints (
+				pair_key, symbol, partner_symbol, bar_date, event_type,
+				orig_pivot_price, new_repaint_price, active_live_price, partner_live_price,
+				active_vs_zero_pct, partner_vs_zero_pct, partner_linear_state,
+				action_taken, note, detected_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(pair_key, symbol, bar_date, event_type) DO UPDATE SET
+				new_repaint_price = CASE WHEN excluded.new_repaint_price > 0 THEN excluded.new_repaint_price ELSE position_repaints.new_repaint_price END,
+				active_live_price = excluded.active_live_price,
+				partner_live_price = excluded.partner_live_price,
+				active_vs_zero_pct = excluded.active_vs_zero_pct,
+				partner_vs_zero_pct = excluded.partner_vs_zero_pct,
+				partner_linear_state = excluded.partner_linear_state,
+				action_taken = excluded.action_taken,
+				note = CASE WHEN excluded.note != '' THEN excluded.note ELSE position_repaints.note END;
+		`,
+			rp.PairKey, strings.ToUpper(strings.TrimSpace(rp.Symbol)),
+			strings.ToUpper(strings.TrimSpace(rp.PartnerSymbol)),
+			rp.BarDate, strings.ToUpper(strings.TrimSpace(rp.EventType)),
+			rp.OrigPivotPrice, rp.NewRepaintPrice, rp.ActiveLivePrice, rp.PartnerLivePrice,
+			rp.ActiveVsZeroPct, rp.PartnerVsZeroPct, rp.PartnerLinearState,
+			rp.ActionTaken, rp.Note, det,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to upsert position repaint for %s: %w", rp.Symbol, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetOpenZeroLines returns all active position zero-line anchors ordered by symbol.
+func (s *SQLiteJournal) GetOpenZeroLines(ctx context.Context) ([]*PositionZeroLine, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT active_symbol, pair_key, entry_signal_id, partner_symbol, armed_date, pivot_label,
+		       active_zero_price, partner_zero_price, active_entry_price, partner_entry_price,
+		       active_live_price, partner_live_price, active_vs_zero_pct, partner_vs_zero_pct,
+		       active_linear_state, partner_linear_state, flip_count, zero_line_status,
+		       state, repaint_count, updated_at
+		FROM position_zero_lines
+		WHERE state = 'OPEN'
+		ORDER BY active_symbol ASC;
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*PositionZeroLine, 0)
+	for rows.Next() {
+		var z PositionZeroLine
+		if err := rows.Scan(
+			&z.ActiveSymbol, &z.PairKey, &z.EntrySignalID, &z.PartnerSymbol, &z.ArmedDate, &z.PivotLabel,
+			&z.ActiveZeroPrice, &z.PartnerZeroPrice, &z.ActiveEntryPrice, &z.PartnerEntryPrice,
+			&z.ActiveLivePrice, &z.PartnerLivePrice, &z.ActiveVsZeroPct, &z.PartnerVsZeroPct,
+			&z.ActiveLinearState, &z.PartnerLinearState, &z.FlipCount, &z.ZeroLineStatus,
+			&z.State, &z.RepaintCount, &z.UpdatedAt,
+		); err == nil {
+			out = append(out, &z)
+		}
+	}
+	return out, nil
+}
+
+// GetRecentPositionRepaints returns the most recent position repaint & zero-line events.
+func (s *SQLiteJournal) GetRecentPositionRepaints(ctx context.Context, limit int) ([]*PositionRepaint, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, pair_key, symbol, partner_symbol, bar_date, event_type,
+		       orig_pivot_price, new_repaint_price, active_live_price, partner_live_price,
+		       active_vs_zero_pct, partner_vs_zero_pct, partner_linear_state,
+		       action_taken, note, detected_at
+		FROM position_repaints
+		ORDER BY bar_date DESC, id DESC
+		LIMIT ?;
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*PositionRepaint, 0)
+	for rows.Next() {
+		var r PositionRepaint
+		if err := rows.Scan(
+			&r.ID, &r.PairKey, &r.Symbol, &r.PartnerSymbol, &r.BarDate, &r.EventType,
+			&r.OrigPivotPrice, &r.NewRepaintPrice, &r.ActiveLivePrice, &r.PartnerLivePrice,
+			&r.ActiveVsZeroPct, &r.PartnerVsZeroPct, &r.PartnerLinearState,
+			&r.ActionTaken, &r.Note, &r.DetectedAt,
+		); err == nil {
+			out = append(out, &r)
+		}
+	}
+	return out, nil
 }

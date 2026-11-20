@@ -41,6 +41,54 @@ type PaperTrade struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
+// PositionZeroLine anchors an open position's immutable entry pivot ("zero line")
+// against its inverse Direxion partner for Zero-Line Flip & Trend-Follow tracking.
+type PositionZeroLine struct {
+	ID                 int64     `json:"id,omitempty"`
+	PairKey            string    `json:"pair_key"`
+	EntrySignalID      string    `json:"entry_signal_id"`
+	ActiveSymbol       string    `json:"active_symbol"`
+	PartnerSymbol      string    `json:"partner_symbol"`
+	ArmedDate          string    `json:"armed_date"`
+	PivotLabel         string    `json:"pivot_label"`
+	ActiveZeroPrice    float64   `json:"active_zero_price"`
+	PartnerZeroPrice   float64   `json:"partner_zero_price"`
+	ActiveEntryPrice   float64   `json:"active_entry_price"`
+	PartnerEntryPrice  float64   `json:"partner_entry_price"`
+	ActiveLivePrice    float64   `json:"active_live_price"`
+	PartnerLivePrice   float64   `json:"partner_live_price"`
+	ActiveVsZeroPct    float64   `json:"active_vs_zero_pct"`
+	PartnerVsZeroPct   float64   `json:"partner_vs_zero_pct"`
+	ActiveLinearState  string    `json:"active_linear_state"`
+	PartnerLinearState string    `json:"partner_linear_state"`
+	FlipCount          int       `json:"flip_count"`
+	ZeroLineStatus     string    `json:"zero_line_status"`
+	State              string    `json:"state"`
+	RepaintCount       int       `json:"repaint_count"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// PositionRepaint records an immutable audit event whenever an active position's
+// entry pivot repaints, breaches the zero line, flips to its opposite partner, or stops out.
+type PositionRepaint struct {
+	ID                 int64     `json:"id,omitempty"`
+	PairKey            string    `json:"pair_key"`
+	Symbol             string    `json:"symbol"`
+	PartnerSymbol      string    `json:"partner_symbol"`
+	BarDate            string    `json:"bar_date"`
+	EventType          string    `json:"event_type"`
+	OrigPivotPrice     float64   `json:"orig_pivot_price"`
+	NewRepaintPrice    float64   `json:"new_repaint_price"`
+	ActiveLivePrice    float64   `json:"active_live_price"`
+	PartnerLivePrice   float64   `json:"partner_live_price"`
+	ActiveVsZeroPct    float64   `json:"active_vs_zero_pct"`
+	PartnerVsZeroPct   float64   `json:"partner_vs_zero_pct"`
+	PartnerLinearState string    `json:"partner_linear_state"`
+	ActionTaken        string    `json:"action_taken"`
+	Note               string    `json:"note"`
+	DetectedAt         time.Time `json:"detected_at"`
+}
+
 // MultiJournal coordinates writing execution records to SQLite (for local idempotency and state),
 // PocketBase (for app collection sync), and Neon (PostgreSQL cloud database).
 type MultiJournal struct {

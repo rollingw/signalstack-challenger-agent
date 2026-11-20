@@ -1331,12 +1331,70 @@ func (s *Server) renderDashboardHTML(
 		lastUpdatedStr = formatCST(latestUpdate)
 	}
 
-	// Positions HTML
+	// Positions HTML (paired with Entry Pivot Zero Line & Opposite Direxion Partner on the right)
+	direxionPartnerMap := map[string]string{
+		"ERX": "ERY", "ERY": "ERX",
+		"FAS": "FAZ", "FAZ": "FAS",
+		"GUSH": "DRIP", "DRIP": "GUSH",
+		"JNUG": "JDST", "JDST": "JNUG",
+		"LABU": "LABD", "LABD": "LABU",
+		"SOXL": "SOXS", "SOXS": "SOXL",
+		"SPXL": "SPXS", "SPXS": "SPXL",
+		"TECL": "TECS", "TECS": "TECL",
+		"TNA": "TZA", "TZA": "TNA",
+	}
+
+	var zeroLines []*journal.PositionZeroLine
+	var repaints []*journal.PositionRepaint
+	if s.journal != nil && s.journal.SQLite() != nil {
+		zlCtx, zlCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		zeroLines, _ = s.journal.SQLite().GetOpenZeroLines(zlCtx)
+		repaints, _ = s.journal.SQLite().GetRecentPositionRepaints(zlCtx, 40)
+		zlCancel()
+	}
+	zeroBySym := make(map[string]*journal.PositionZeroLine, len(zeroLines))
+	for _, zl := range zeroLines {
+		if zl != nil {
+			zeroBySym[strings.ToUpper(strings.TrimSpace(zl.ActiveSymbol))] = zl
+		}
+	}
+
+	renderLinBadge := func(st string) string {
+		switch strings.ToUpper(strings.TrimSpace(st)) {
+		case "GREEN_HOLD":
+			return `<span style="background: #064e3b; color: #34d399; border: 1px solid #10b981; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 800; white-space: nowrap;">LIN GREEN HOLD</span>`
+		case "GREEN":
+			return `<span style="background: #065f46; color: #6ee7b7; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap;">LIN GREEN</span>`
+		case "RED":
+			return `<span style="background: #7f1d1d; color: #fca5a5; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap;">LIN RED</span>`
+		default:
+			return `<span style="background: #1e293b; color: #94a3b8; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;">-</span>`
+		}
+	}
+
+	renderZeroStatusBadge := func(st string, flips int) string {
+		up := strings.ToUpper(strings.TrimSpace(st))
+		if flips > 0 || up == "TREND_FOLLOW" {
+			return `<span style="background: #3b0764; color: #e9d5ff; border: 1px solid #a855f7; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 800; white-space: nowrap;">📈 TREND LEG</span>`
+		}
+		switch up {
+		case "FLIP_READY":
+			return `<span style="background: #7c2d12; color: #fed7aa; border: 1px solid #f97316; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 800; white-space: nowrap;">⚡ FLIP READY</span>`
+		case "BREACHED":
+			return `<span style="background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 800; white-space: nowrap;">BREACHED 0-LINE</span>`
+		case "WATCH":
+			return `<span style="background: #78350f; color: #fde68a; border: 1px solid #f59e0b; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap;">WATCH 0-LINE</span>`
+		default:
+			return `<span style="background: #064e3b; color: #34d399; border: 1px solid #10b981; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; white-space: nowrap;">ABOVE 0-LINE</span>`
+		}
+	}
+
 	posRowsHTML := ""
 	if len(positions) == 0 {
-		posRowsHTML = `<tr><td colspan="9" style="text-align: center; color: #94a3b8; padding: 22px; font-size: 13px;">No open positions (Flat cash — Ready for incoming bootstrap buy signals)</td></tr>`
+		posRowsHTML = `<tr><td colspan="12" style="text-align: center; color: #94a3b8; padding: 22px; font-size: 13px;">No open positions (Flat cash — Ready for incoming bootstrap buy signals)</td></tr>`
 	} else {
 		for _, p := range positions {
+			symUp := strings.ToUpper(strings.TrimSpace(p.Symbol))
 			plColor := "#10b981"
 			if p.UnrealizedPL < 0 {
 				plColor = "#f87171"
@@ -1352,26 +1410,160 @@ func (s *Server) renderDashboardHTML(
 			} else if p.PrevClosePrice > 0 || p.AvgEntryPrice > 0 {
 				dayStr = "$0.00 (0.00%)"
 			}
+
+			partnerSym := direxionPartnerMap[symUp]
+			zl := zeroBySym[symUp]
+			zeroCellHTML := `<span style="color: #64748b; font-size: 11px;">Pending sync</span>`
+			oppSymbolHTML := fmt.Sprintf(`<span style="font-weight: 800; color: #c084fc; font-size: 13px;">%s</span>`, html.EscapeString(partnerSym))
+			oppPriceHTML := `<span style="color: #64748b; font-size: 11px;">-</span>`
+			oppTrendHTML := renderLinBadge("")
+			legBadge := ""
+
+			if zl != nil {
+				if zl.PartnerSymbol != "" {
+					partnerSym = zl.PartnerSymbol
+					oppSymbolHTML = fmt.Sprintf(`<span style="font-weight: 800; color: #c084fc; font-size: 13px;">%s</span>`, html.EscapeString(partnerSym))
+				}
+				if zl.FlipCount > 0 {
+					legBadge = `<div style="margin-top: 2px;"><span style="background: #3b0764; color: #d8b4fe; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 800;">FLIPPED TREND</span></div>`
+				}
+				aZeroColor := "#34d399"
+				if zl.ActiveVsZeroPct < 0 {
+					aZeroColor = "#f87171"
+				}
+				repaintPill := ""
+				if zl.RepaintCount > 0 {
+					repaintPill = fmt.Sprintf(` <span style="background: #1e293b; color: #fbbf24; border: 1px solid #475569; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 700;">%d repaint%s</span>`,
+						zl.RepaintCount, func() string {
+							if zl.RepaintCount == 1 {
+								return ""
+							}
+							return "s"
+						}())
+				}
+				pivLbl := html.EscapeString(zl.PivotLabel)
+				if pivLbl == "" {
+					pivLbl = "PIVOT"
+				}
+				zeroCellHTML = fmt.Sprintf(
+					`<div style="font-family: monospace; font-size: 12px; color: #e2e8f0; white-space: nowrap;">%s <strong>$%.2f</strong> <span style="color: %s; font-weight: 700;">(%+.1f%%)</span></div><div style="margin-top: 3px;">%s%s</div>`,
+					pivLbl, zl.ActiveZeroPrice, aZeroColor, zl.ActiveVsZeroPct,
+					renderZeroStatusBadge(zl.ZeroLineStatus, zl.FlipCount), repaintPill,
+				)
+
+				pZeroColor := "#34d399"
+				if zl.PartnerVsZeroPct < 0 {
+					pZeroColor = "#f87171"
+				}
+				if zl.PartnerLivePrice > 0 {
+					oppPriceHTML = fmt.Sprintf(
+						`<div style="font-family: monospace; font-size: 12px; color: #f8fafc; font-weight: 700; white-space: nowrap;">$%.2f <span style="color: %s;">(%+.1f%%)</span></div><div style="font-family: monospace; font-size: 10px; color: #94a3b8; white-space: nowrap;">0-Line: $%.2f</div>`,
+						zl.PartnerLivePrice, pZeroColor, zl.PartnerVsZeroPct, zl.PartnerZeroPrice,
+					)
+				}
+				oppTrendHTML = renderLinBadge(zl.PartnerLinearState)
+			}
+
 			posRowsHTML += fmt.Sprintf(`
 			<tr style="border-bottom: 1px solid #1e293b;">
-				<td style="padding: 10px 14px; font-weight: 700; color: #ffffff; font-size: 14px;">%s</td>
-				<td style="padding: 10px 14px; text-align: right; color: #ffffff; font-weight: 600;">%g</td>
-				<td style="padding: 10px 14px; text-align: right; color: #38bdf8; font-weight: 700;">$%.2f</td>
-				<td style="padding: 10px 14px; text-align: right; color: #ffffff; font-weight: 600;">$%.2f</td>
-				<td style="padding: 10px 14px; text-align: right; font-weight: 700; color: %s;">%s</td>
-				<td style="padding: 10px 14px; text-align: right; color: #ffffff; font-weight: 600;">%s</td>
-				<td style="padding: 10px 14px; text-align: right; font-weight: 700; color: %s;">%s (%+.2f%%)</td>
-				<td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #38bdf8; font-weight: 600;">%s</td>
-				<td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #94a3b8;">%s</td>
+				<td style="padding: 10px 12px; font-weight: 700; color: #ffffff; font-size: 14px; white-space: nowrap;">%s%s</td>
+				<td style="padding: 10px 10px; text-align: right; color: #ffffff; font-weight: 600;">%g</td>
+				<td style="padding: 10px 10px; text-align: right; color: #38bdf8; font-weight: 700;">$%.2f</td>
+				<td style="padding: 10px 10px; text-align: right; color: #ffffff; font-weight: 600;">$%.2f</td>
+				<td style="padding: 10px 10px; text-align: right; font-weight: 700; color: %s; white-space: nowrap;">%s</td>
+				<td style="padding: 10px 10px; text-align: right; color: #ffffff; font-weight: 600;">%s</td>
+				<td style="padding: 10px 10px; text-align: right; font-weight: 700; color: %s; white-space: nowrap;">%s (%+.2f%%)</td>
+				<td style="padding: 10px 12px; border-left: 2px solid #334155; background: rgba(15, 23, 42, 0.55);">%s</td>
+				<td style="padding: 10px 10px; border-left: 1px solid #334155; background: rgba(30, 27, 75, 0.35); text-align: center;">%s</td>
+				<td style="padding: 10px 10px; background: rgba(30, 27, 75, 0.35); text-align: right;">%s</td>
+				<td style="padding: 10px 10px; background: rgba(30, 27, 75, 0.35); text-align: center;">%s</td>
+				<td style="padding: 10px 10px; font-family: monospace; font-size: 11px; color: #94a3b8; white-space: nowrap;">%s</td>
 			</tr>`,
-				p.Symbol, p.Qty, p.AvgEntryPrice, p.CurrentPrice,
+				p.Symbol, legBadge, p.Qty, p.AvgEntryPrice, p.CurrentPrice,
 				dayColor, dayStr,
 				formatCurrency(p.MarketValue), plColor, formatCurrency(p.UnrealizedPL), p.UnrealizedPLPct,
-				formatCST(p.UpdatedAt),
+				zeroCellHTML,
+				oppSymbolHTML, oppPriceHTML, oppTrendHTML,
 				formatCSTShort(p.OpenedAt),
 			)
 		}
 	}
+
+	// Position Repaints & Zero-Line Events Panel HTML
+	repaintRowsHTML := ""
+	if len(repaints) == 0 {
+		repaintRowsHTML = `<tr><td colspan="9" style="text-align: center; color: #94a3b8; padding: 18px; font-size: 12px;">No position entry-pivot repaints or zero-line breaches recorded yet.</td></tr>`
+	} else {
+		for _, rp := range repaints {
+			evtColor := "#fbbf24"
+			evtBg := "#78350f"
+			switch strings.ToUpper(rp.EventType) {
+			case "ZERO_LINE_FLIP":
+				evtColor = "#e9d5ff"
+				evtBg = "#581c87"
+			case "ZERO_LINE_BREACH", "FLIP_ZERO_STOP", "CATASTROPHIC_STOP":
+				evtColor = "#fca5a5"
+				evtBg = "#7f1d1d"
+			}
+			aCol := "#34d399"
+			if rp.ActiveVsZeroPct < 0 {
+				aCol = "#f87171"
+			}
+			pCol := "#34d399"
+			if rp.PartnerVsZeroPct < 0 {
+				pCol = "#f87171"
+			}
+			repaintRowsHTML += fmt.Sprintf(`
+			<tr style="border-bottom: 1px solid #1e293b;">
+				<td style="padding: 8px 10px; font-family: monospace; font-size: 11px; color: #cbd5e1; white-space: nowrap;">%s</td>
+				<td style="padding: 8px 10px; font-weight: 700; color: #ffffff; font-size: 12px; white-space: nowrap;">%s &rarr; <span style="color: #c084fc;">%s</span></td>
+				<td style="padding: 8px 10px; text-align: center;"><span style="background: %s; color: %s; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 800; white-space: nowrap;">%s</span></td>
+				<td style="padding: 8px 10px; text-align: right; font-family: monospace; font-size: 12px; color: #94a3b8; white-space: nowrap;">$%.2f &rarr; <strong style="color: #f8fafc;">$%.2f</strong></td>
+				<td style="padding: 8px 10px; text-align: right; font-family: monospace; font-size: 12px; color: %s; font-weight: 700; white-space: nowrap;">%+.1f%%</td>
+				<td style="padding: 8px 10px; text-align: right; font-family: monospace; font-size: 12px; color: %s; font-weight: 700; white-space: nowrap;">$%.2f (%+.1f%%)</td>
+				<td style="padding: 8px 10px; text-align: center;">%s</td>
+				<td style="padding: 8px 10px; font-family: monospace; font-size: 11px; color: #38bdf8; font-weight: 700; white-space: nowrap;">%s</td>
+				<td style="padding: 8px 10px; font-size: 11px; color: #94a3b8;">%s</td>
+			</tr>`,
+				html.EscapeString(rp.BarDate),
+				html.EscapeString(rp.Symbol), html.EscapeString(rp.PartnerSymbol),
+				evtBg, evtColor, html.EscapeString(rp.EventType),
+				rp.OrigPivotPrice, rp.NewRepaintPrice,
+				aCol, rp.ActiveVsZeroPct,
+				pCol, rp.PartnerLivePrice, rp.PartnerVsZeroPct,
+				renderLinBadge(rp.PartnerLinearState),
+				html.EscapeString(rp.ActionTaken),
+				html.EscapeString(rp.Note),
+			)
+		}
+	}
+	repaintsPanelHTML := fmt.Sprintf(`
+		<div class="panel">
+			<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+				<h2 class="panel-title" style="margin: 0;">Entry Pivot Repaints &amp; Zero-Line Audit Log (%d Events)</h2>
+				<span style="font-size: 11px; color: #c084fc; background: #1e1b4b; border: 1px solid #6366f1; padding: 3px 10px; border-radius: 6px; font-weight: 700;">Zero-Line Flip Engine (Z-I: &plusmn;2%% Pivot + Lin Green Hold)</span>
+			</div>
+			<div style="overflow-x: auto;">
+				<table>
+					<thead>
+						<tr>
+							<th>Bar Date</th>
+							<th>Active &rarr; Opposite</th>
+							<th style="text-align: center;">Event</th>
+							<th style="text-align: right;">Pivot &rarr; Repaint</th>
+							<th style="text-align: right;">Active vs 0-Line</th>
+							<th style="text-align: right;">Opposite vs 0-Line</th>
+							<th style="text-align: center;">Opp Linear</th>
+							<th>Action</th>
+							<th>Note</th>
+						</tr>
+					</thead>
+					<tbody>
+						%s
+					</tbody>
+				</table>
+			</div>
+		</div>`, len(repaints), repaintRowsHTML)
 
 	// Executions HTML
 	execRowsHTML := ""
@@ -1605,22 +1797,25 @@ func (s *Server) renderDashboardHTML(
 
 		<div class="panel">
 			<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
-				<h2 class="panel-title" style="margin: 0;">Active Paper Positions (Holdings: %d)</h2>
+				<h2 class="panel-title" style="margin: 0;">Active Paper Positions &amp; Opposite Pair Zero Line (Holdings: %d)</h2>
 				<span style="font-size: 12px; font-weight: 700; color: #38bdf8; background: #0c4a6e; border: 1px solid #0284c7; padding: 4px 10px; border-radius: 6px;">⏱️ Last Updated: %s</span>
 			</div>
 			<div style="overflow-x: auto;">
 				<table>
 					<thead>
 						<tr>
-							<th>Symbol</th>
+							<th>Active</th>
 							<th style="text-align: right;">Shares</th>
-							<th style="text-align: right;">Live Broker Fill</th>
-							<th style="text-align: right;">Mark Price</th>
-							<th style="text-align: right;">Today's Change</th>
-							<th style="text-align: right;">Market Value</th>
-							<th style="text-align: right;">Total Unrealized P/L</th>
-							<th>Last Updated (CST)</th>
-							<th>Opened At (CST)</th>
+							<th style="text-align: right;">Fill</th>
+							<th style="text-align: right;">Mark</th>
+							<th style="text-align: right;">Today</th>
+							<th style="text-align: right;">Mkt Value</th>
+							<th style="text-align: right;">Unrealized P/L</th>
+							<th style="border-left: 2px solid #334155; color: #fbbf24;">Entry Pivot (0-Line)</th>
+							<th style="border-left: 1px solid #334155; color: #c084fc; text-align: center;">Opposite</th>
+							<th style="color: #c084fc; text-align: right;">Opp Mark vs 0-Line</th>
+							<th style="color: #c084fc; text-align: center;">Opp Trend</th>
+							<th>Opened (CST)</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -1629,6 +1824,8 @@ func (s *Server) renderDashboardHTML(
 				</table>
 			</div>
 		</div>
+
+		%s
 
 		%s
 
@@ -1685,6 +1882,18 @@ func (s *Server) renderDashboardHTML(
 				<div><span class="endpoint-method">POST</span> /positions/reconcile</div>
 				<div style="color: #94a3b8;">Reconcile positions and balances from broker (Bearer token required)</div>
 			</div>
+			<div class="endpoint-item">
+				<div><span class="endpoint-method">GET</span> /zero-lines</div>
+				<div style="color: #94a3b8;">Active pair Entry Pivot Zero-Line anchors &amp; opposite symbol tracking</div>
+			</div>
+			<div class="endpoint-item">
+				<div><span class="endpoint-method">GET</span> /repaints</div>
+				<div style="color: #94a3b8;">Audit log of position pivot repaints, zero-line breaches &amp; flips</div>
+			</div>
+			<div class="endpoint-item">
+				<div><span class="endpoint-method">POST</span> /zero-lines/sync</div>
+				<div style="color: #94a3b8;">Sync active zero-line anchors &amp; repaint events (Bearer token required)</div>
+			</div>
 		</div>
 	</div>
 </body>
@@ -1697,6 +1906,7 @@ func (s *Server) renderDashboardHTML(
 		realizedClass, realizedStr, realizedColor, winRateStr,
 		plClass, plStr, realizedColor, realizedStr, unrealizedColor, unrealizedStr,
 		len(positions), lastUpdatedStr, posRowsHTML,
+		repaintsPanelHTML,
 		closedLedgerPanelHTML,
 		execRowsHTML,
 	)
@@ -1726,6 +1936,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	positions, _ := s.broker.GetAllPositions(ctx)
 	recent, _ := s.journal.GetRecentExecutions(ctx, 10)
+	var zeroLines []*journal.PositionZeroLine
+	var repaints []*journal.PositionRepaint
+	if s.journal != nil && s.journal.SQLite() != nil {
+		zeroLines, _ = s.journal.SQLite().GetOpenZeroLines(ctx)
+		repaints, _ = s.journal.SQLite().GetRecentPositionRepaints(ctx, 25)
+	}
 
 	var latestUpdate time.Time
 	for _, p := range positions {
@@ -1745,6 +1961,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"account":                 acct,
 		"open_positions_count":    len(positions),
 		"open_positions":          positions,
+		"zero_lines_count":        len(zeroLines),
+		"zero_lines":              zeroLines,
+		"recent_repaints_count":   len(repaints),
+		"recent_repaints":         repaints,
 		"recent_executions_count": len(recent),
 		"recent_executions":       recent,
 		"timestamp":               time.Now().UTC().Format(time.RFC3339),
@@ -2152,5 +2372,76 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 		"filled_shares":   orderResp.FilledQty,
 		"fill_price":      orderResp.FilledAvgPrice,
 		"submitted_at":    orderResp.SubmittedAt.Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleZeroLines(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if s.journal == nil || s.journal.SQLite() == nil {
+		s.writeJSON(w, http.StatusOK, map[string]any{"total": 0, "zero_lines": []any{}})
+		return
+	}
+	items, err := s.journal.SQLite().GetOpenZeroLines(ctx)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "database_error", "message": err.Error()})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"total":      len(items),
+		"zero_lines": items,
+	})
+}
+
+func (s *Server) handleRepaints(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	limit := 100
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if s.journal == nil || s.journal.SQLite() == nil {
+		s.writeJSON(w, http.StatusOK, map[string]any{"total": 0, "repaints": []any{}})
+		return
+	}
+	items, err := s.journal.SQLite().GetRecentPositionRepaints(ctx, limit)
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "database_error", "message": err.Error()})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"total":    len(items),
+		"repaints": items,
+	})
+}
+
+func (s *Server) handleSyncZeroLines(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ZeroLines   []*journal.PositionZeroLine `json:"zero_lines"`
+		Repaints    []*journal.PositionRepaint  `json:"repaints,omitempty"`
+		ReplaceOpen bool                        `json:"replace_open,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	if s.journal == nil || s.journal.SQLite() == nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "sqlite_unavailable"})
+		return
+	}
+	if err := s.journal.SQLite().SyncZeroLinesAndRepaints(r.Context(), req.ZeroLines, req.Repaints, req.ReplaceOpen); err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "sync_failed", "message": err.Error()})
+		return
+	}
+	items, _ := s.journal.SQLite().GetOpenZeroLines(r.Context())
+	repaints, _ := s.journal.SQLite().GetRecentPositionRepaints(r.Context(), 50)
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status":           "synced",
+		"zero_lines_count": len(items),
+		"repaints_count":   len(repaints),
 	})
 }

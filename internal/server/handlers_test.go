@@ -235,3 +235,119 @@ func TestDashboardLoginGateAndSession(t *testing.T) {
 		t.Fatalf("expected 303 redirect to /login on logout, got %d", rrLogout.Code)
 	}
 }
+
+func TestZeroLinesAndRepaintsSyncAndDashboardRender(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_zl.db")
+	sqliteJ, err := journal.NewSQLiteJournal(dbPath, 100000.0, 2.0, "2026-09-28")
+	if err != nil {
+		t.Fatalf("failed to create sqlite journal: %v", err)
+	}
+	defer sqliteJ.Close()
+
+	multiJ := journal.NewMultiJournal(sqliteJ, nil, nil)
+	cfg := &config.Config{
+		Port:          "8080",
+		AccountNumber: "PA3HW1A38DR2",
+		ServiceName:   "SignalStack Challenger Trading Agent",
+		SignalSecret:  "test-secret",
+	}
+	ssBroker := broker.NewSignalStackBroker("", "", "close", true, sqliteJ)
+	srv := NewServer(cfg, ssBroker, multiJ)
+
+	// 1. Sync zero-line + repaint via POST /zero-lines/sync
+	payload := `{
+		"replace_open": true,
+		"zero_lines": [{
+			"pair_key": "JNUG/JDST",
+			"entry_signal_id": "sig-buy-JNUG-202611131100-21",
+			"active_symbol": "JNUG",
+			"partner_symbol": "JDST",
+			"armed_date": "2026-11-12 11:00",
+			"pivot_label": "HL",
+			"active_zero_price": 107.36,
+			"partner_zero_price": 30.09,
+			"active_entry_price": 109.65,
+			"partner_entry_price": 30.09,
+			"active_live_price": 71.20,
+			"partner_live_price": 43.52,
+			"active_vs_zero_pct": -33.68,
+			"partner_vs_zero_pct": 44.63,
+			"active_linear_state": "RED",
+			"partner_linear_state": "GREEN_HOLD",
+			"flip_count": 0,
+			"zero_line_status": "FLIP_READY",
+			"state": "OPEN",
+			"repaint_count": 2
+		}],
+		"repaints": [{
+			"pair_key": "JNUG/JDST",
+			"symbol": "JNUG",
+			"partner_symbol": "JDST",
+			"bar_date": "2026-11-16 12:00",
+			"event_type": "PIVOT_REPAINT",
+			"orig_pivot_price": 107.36,
+			"new_repaint_price": 102.01,
+			"active_live_price": 102.01,
+			"partner_live_price": 31.85,
+			"active_vs_zero_pct": -4.98,
+			"partner_vs_zero_pct": 5.85,
+			"partner_linear_state": "GREEN_HOLD",
+			"action_taken": "FLIP_READY",
+			"note": "Macro HL @ $107.36 superseded by $102.01"
+		}]
+	}`
+	reqSync := httptest.NewRequest(http.MethodPost, "/zero-lines/sync", strings.NewReader(payload))
+	reqSync.Header.Set("Authorization", "Bearer test-secret")
+	reqSync.Header.Set("Content-Type", "application/json")
+	rrSync := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrSync, reqSync)
+	if rrSync.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from POST /zero-lines/sync, got %d: %s", rrSync.Code, rrSync.Body.String())
+	}
+
+	// 2. Verify GET /zero-lines & GET /repaints return persisted records
+	reqZL := httptest.NewRequest(http.MethodGet, "/zero-lines", nil)
+	rrZL := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrZL, reqZL)
+	if rrZL.Code != http.StatusOK || !strings.Contains(rrZL.Body.String(), "JDST") || !strings.Contains(rrZL.Body.String(), "FLIP_READY") {
+		t.Fatalf("GET /zero-lines unexpected response (%d): %s", rrZL.Code, rrZL.Body.String())
+	}
+
+	reqRP := httptest.NewRequest(http.MethodGet, "/repaints", nil)
+	rrRP := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rrRP, reqRP)
+	if rrRP.Code != http.StatusOK || !strings.Contains(rrRP.Body.String(), "PIVOT_REPAINT") {
+		t.Fatalf("GET /repaints unexpected response (%d): %s", rrRP.Code, rrRP.Body.String())
+	}
+
+	// 3. Verify paired dashboard HTML renders Active JNUG + Entry Pivot Zero Line + Opposite JDST + Audit Table
+	positions := []*broker.Position{
+		{
+			Symbol:          "JNUG",
+			Qty:             21,
+			AvgEntryPrice:   109.65,
+			CurrentPrice:    71.20,
+			MarketValue:     1495.20,
+			UnrealizedPL:    -807.45,
+			UnrealizedPLPct: -35.07,
+			OpenedAt:        time.Date(2026, 11, 13, 15, 2, 0, 0, time.UTC),
+			UpdatedAt:       time.Date(2026, 11, 20, 21, 0, 0, 0, time.UTC),
+		},
+	}
+	htmlOut := srv.renderDashboardHTML(&broker.Account{AccountNumber: "PA3HW1A38DR2", Status: "ACTIVE"}, positions, nil, nil, nil)
+	for _, want := range []string{
+		"Opposite Pair Zero Line",
+		"HL <strong>$107.36</strong>",
+		"⚡ FLIP READY",
+		"JDST",
+		"$43.52",
+		"LIN GREEN HOLD",
+		"Entry Pivot Repaints &amp; Zero-Line Audit Log (1 Events)",
+		"PIVOT_REPAINT",
+	} {
+		if !strings.Contains(htmlOut, want) {
+			t.Fatalf("dashboard HTML missing expected Zero-Line UI element: %q", want)
+		}
+	}
+}

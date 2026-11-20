@@ -49,11 +49,14 @@ func NewServer(cfg *config.Config, b *broker.SignalStackBroker, j *journal.Multi
 	mux.HandleFunc("GET /positions", s.handlePositions)
 	mux.HandleFunc("GET /journal", s.handleJournal)
 	mux.HandleFunc("GET /trades", s.handleTrades)
+	mux.HandleFunc("GET /zero-lines", s.handleZeroLines)
+	mux.HandleFunc("GET /repaints", s.handleRepaints)
 
 	// Authenticated endpoints
 	mux.HandleFunc("POST /signal", s.authMiddleware(s.handleSignal))
 	mux.HandleFunc("POST /price", s.authMiddleware(s.handlePriceUpdate))
 	mux.HandleFunc("POST /positions/reconcile", s.authMiddleware(s.handleReconcilePositions))
+	mux.HandleFunc("POST /zero-lines/sync", s.authMiddleware(s.handleSyncZeroLines))
 
 	s.httpServer = &http.Server{
 		Addr:         ":" + cfg.Port,
