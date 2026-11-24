@@ -350,4 +350,9 @@ func TestZeroLinesAndRepaintsSyncAndDashboardRender(t *testing.T) {
 			t.Fatalf("dashboard HTML missing expected Zero-Line UI element: %q", want)
 		}
 	}
+	ledgerIdx := strings.Index(htmlOut, "Challenger M7d Historical &amp; Live Trade Ledger")
+	repaintsIdx := strings.Index(htmlOut, "Entry Pivot Repaints &amp; Zero-Line Audit Log")
+	if ledgerIdx < 0 || repaintsIdx < 0 || ledgerIdx >= repaintsIdx {
+		t.Fatalf("expected Historical & Live Trade Ledger (idx=%d) to render above Entry Pivot Repaints & Zero-Line Audit Log (idx=%d)", ledgerIdx, repaintsIdx)
+	}
 }

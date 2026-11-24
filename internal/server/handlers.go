@@ -1919,8 +1919,8 @@ func (s *Server) renderDashboardHTML(
 		realizedClass, realizedStr, realizedColor, winRateStr,
 		plClass, plStr, realizedColor, realizedStr, unrealizedColor, unrealizedStr,
 		len(positions), lastUpdatedStr, posRowsHTML,
-		repaintsPanelHTML,
 		closedLedgerPanelHTML,
+		repaintsPanelHTML,
 		execRowsHTML,
 	)
 }
