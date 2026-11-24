@@ -55,9 +55,30 @@ func TestBuildClosedTradeLedgerAndDashboardHTML(t *testing.T) {
 			SignalID:   "sig-exit-ch-SPXL-202610281100-8",
 			Timestamp:  tSell,
 		},
-		// Canceled after-hours trade should be filtered out
+		// Genuine canceled after-hours trade should be filtered out
 		{
 			ID:         3,
+			Symbol:     "TNA",
+			Action:     "SELL",
+			Shares:     41,
+			Price:      59.664,
+			RealizedPL: 51.41,
+			SignalID:   "sig-exit-ch-TNA-202610281500-41",
+			Timestamp:  tSell.Add(3 * time.Hour),
+		},
+		// Filled Oct 29 TZA exit must NOT be filtered out
+		{
+			ID:         4,
+			Symbol:     "TZA",
+			Action:     "BUY",
+			Shares:     55,
+			Price:      44.9805,
+			RealizedPL: 0,
+			SignalID:   "sig-buy-TZA-202610291200-55",
+			Timestamp:  tBuy.Add(24 * time.Hour),
+		},
+		{
+			ID:         5,
 			Symbol:     "TZA",
 			Action:     "SELL",
 			Shares:     55,
@@ -109,8 +130,8 @@ func TestBuildClosedTradeLedgerAndDashboardHTML(t *testing.T) {
 	}
 
 	rows, weeks := buildClosedTradeLedger(trades, neonMeta)
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 closed ledger rows (excluding canceled signal), got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 closed ledger rows (excluding canceled Oct 28 TNA, including filled Oct 29 TZA), got %d", len(rows))
 	}
 	if len(weeks) != 1 || weeks[0] != "2026-10-26" {
 		t.Fatalf("expected week 2026-10-26, got %v", weeks)

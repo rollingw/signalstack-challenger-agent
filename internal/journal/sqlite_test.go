@@ -363,4 +363,75 @@ func TestGetAccountUsesLastEquityForTrueDayPL(t *testing.T) {
 	}
 }
 
+func TestReconcileBackfillChronologicalRealizedPL(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test_backfill_chrono.db")
+
+	j, err := NewSQLiteJournal(dbPath, 100000.0, 2.0, "2026-10-20")
+	if err != nil {
+		t.Fatalf("failed to create sqlite journal: %v", err)
+	}
+	defer j.Close()
+
+	// Seed two historical BUY cycles for SOXL where the first SELL (Oct 23 remediation) was originally missing
+	t1 := time.Date(2026, 10, 22, 13, 43, 17, 0, time.UTC)
+	t2 := time.Date(2026, 10, 23, 14, 4, 11, 0, time.UTC)
+	t3 := time.Date(2026, 10, 27, 13, 38, 57, 0, time.UTC)
+	_, err = j.db.Exec(`
+		INSERT INTO paper_trades (symbol, action, shares, price, realized_pl, signal_id, timestamp) VALUES
+			('SOXL', 'BUY',  26, 89.95,   0.0, 'sig-buy-SOXL-202610221200-26', ?),
+			('SOXL', 'BUY',  29, 84.6807, 0.0, 'sig-buy-SOXL-202610231200-29', ?),
+			('SOXL', 'SELL', 29, 96.3672, 0.0, 'sig-exit-SOXL-202610271200-29', ?);
+	`, t1, t2, t3)
+	if err != nil {
+		t.Fatalf("failed to seed paper_trades: %v", err)
+	}
+
+	// Backfill missing Oct 23 SELL (inserted later with higher ID, but earlier timestamp than t2)
+	orders := []*broker.ReconcileOrderFillItem{
+		{
+			Symbol:        "SOXL",
+			Action:        "SELL",
+			Shares:        26,
+			FillPrice:     81.506154,
+			ClientOrderID: "remediate-pair-challenger-SOXL-20261022",
+			Timestamp:     "2026-10-23T13:34:03Z",
+			Upsert:        true,
+		},
+	}
+	if err := j.ReconcilePositions(ctx, nil, orders, 100119.37, false); err != nil {
+		t.Fatalf("ReconcilePositions backfill failed: %v", err)
+	}
+
+	// Run a second reconcile with no orders to verify chronological Step 3 preserves exact realized_pl
+	if err := j.ReconcilePositions(ctx, nil, nil, 100119.37, false); err != nil {
+		t.Fatalf("second ReconcilePositions failed: %v", err)
+	}
+
+	trades, err := j.GetRecentTrades(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetRecentTrades failed: %v", err)
+	}
+	bySig := make(map[string]*PaperTrade)
+	for _, tr := range trades {
+		bySig[tr.SignalID] = tr
+	}
+
+	rem := bySig["remediate-pair-challenger-SOXL-20261022"]
+	if rem == nil {
+		t.Fatalf("expected backfilled remediation SELL row to exist")
+	}
+	wantRemRPL := 26.0 * (81.506154 - 89.95) // -219.54
+	if rem.RealizedPL < wantRemRPL-0.02 || rem.RealizedPL > wantRemRPL+0.02 {
+		t.Errorf("backfilled SELL realized_pl = %.4f, want %.4f (must match Oct 22 BUY, not Oct 23 BUY)", rem.RealizedPL, wantRemRPL)
+	}
+
+	oct27 := bySig["sig-exit-SOXL-202610271200-29"]
+	wantOct27RPL := 29.0 * (96.3672 - 84.6807) // +338.91
+	if oct27 == nil || oct27.RealizedPL < wantOct27RPL-0.02 || oct27.RealizedPL > wantOct27RPL+0.02 {
+		t.Errorf("Oct 27 SELL realized_pl = %+v, want %.4f", oct27, wantOct27RPL)
+	}
+}
+
+
 

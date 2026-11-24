@@ -90,6 +90,8 @@ type ReconcileOrderFillItem struct {
 	OrderID       string   `json:"order_id,omitempty"`
 	ClientOrderID string   `json:"client_order_id,omitempty"`
 	RealizedPL    *float64 `json:"realized_pl,omitempty"`
+	Timestamp     string   `json:"timestamp,omitempty"`
+	Upsert        bool     `json:"upsert,omitempty"`
 }
 
 // Broker defines the standard abstraction for broker adapters.

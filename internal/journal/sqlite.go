@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -837,6 +838,18 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 		act := strings.ToUpper(strings.TrimSpace(o.Action))
 		matched := false
 
+		var parsedTS time.Time
+		hasTS := false
+		if tsStr := strings.TrimSpace(o.Timestamp); tsStr != "" {
+			if t, pErr := time.Parse(time.RFC3339Nano, tsStr); pErr == nil {
+				parsedTS = t.UTC()
+				hasTS = true
+			} else if t, pErr := time.Parse(time.RFC3339, tsStr); pErr == nil {
+				parsedTS = t.UTC()
+				hasTS = true
+			}
+		}
+
 		// A. Try exact match by order_id or client_order_id or signal_id in execution_journal
 		if o.OrderID != "" || o.ClientOrderID != "" {
 			var execID int64
@@ -893,6 +906,9 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 							WHERE signal_id = ?;
 						`, o.FillPrice, execSigID)
 					}
+					if hasTS {
+						_, _ = tx.ExecContext(ctx, `UPDATE paper_trades SET timestamp = ? WHERE signal_id = ?;`, parsedTS, execSigID)
+					}
 				}
 			}
 		}
@@ -921,7 +937,33 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 						WHERE id = ?;
 					`, o.Shares, o.FillPrice, tradeID)
 				}
+				if hasTS {
+					_, _ = tx.ExecContext(ctx, `UPDATE paper_trades SET timestamp = ? WHERE id = ?;`, parsedTS, tradeID)
+				}
 			}
+		}
+
+		// A3. Explicit historical broker fill backfill (when Upsert is requested and no exact ID match exists)
+		if !matched && o.Upsert && sym != "" && (act == "BUY" || act == "SELL") && o.Shares > 0 {
+			sigID := strings.TrimSpace(o.ClientOrderID)
+			if sigID == "" {
+				sigID = strings.TrimSpace(o.OrderID)
+			}
+			rplVal := 0.0
+			if o.RealizedPL != nil {
+				rplVal = *o.RealizedPL
+			}
+			tsVal := time.Now().UTC()
+			if hasTS {
+				tsVal = parsedTS
+			}
+			if _, iErr := tx.ExecContext(ctx, `
+				INSERT INTO paper_trades (symbol, action, shares, price, realized_pl, signal_id, timestamp)
+				VALUES (?, ?, ?, ?, ?, ?, ?);
+			`, sym, act, o.Shares, o.FillPrice, rplVal, sigID, tsVal); iErr != nil {
+				return fmt.Errorf("failed to backfill paper_trade for %s (%s): %w", sym, sigID, iErr)
+			}
+			matched = true
 		}
 
 		// B. Fallback: match latest trade by symbol and action
@@ -1086,34 +1128,58 @@ func (s *SQLiteJournal) ReconcilePositions(ctx context.Context, positions []*bro
 		}
 	}
 
-	// 3. Recompute realized_pl for all SELL trades in paper_trades based on actual BUY fill prices
-	sRows, err := tx.QueryContext(ctx, `SELECT id, symbol, shares, price FROM paper_trades WHERE action = 'SELL' ORDER BY id ASC;`)
+	// 3. Recompute realized_pl for all SELL trades in paper_trades based on chronological prior BUY fill prices
+	tRows, err := tx.QueryContext(ctx, `
+		SELECT id, symbol, action, shares, price, COALESCE(signal_id, ''), timestamp
+		FROM paper_trades
+		ORDER BY id ASC;
+	`)
 	if err == nil {
-		type sellRec struct {
-			id     int64
-			symbol string
-			shares float64
-			price  float64
+		type tradeRec struct {
+			id       int64
+			symbol   string
+			action   string
+			shares   float64
+			price    float64
+			signalID string
+			ts       time.Time
 		}
-		var sells []sellRec
-		for sRows.Next() {
-			var r sellRec
-			if err := sRows.Scan(&r.id, &r.symbol, &r.shares, &r.price); err == nil {
-				sells = append(sells, r)
+		canceledBuys := map[string]bool{
+			"sig-buy-LABD-202610281500-250": true,
+			"sig-buy-SPXS-202610281500-100": true,
+			"sig-buy-TZA-202610281500-50":   true,
+		}
+		var allTrades []tradeRec
+		for tRows.Next() {
+			var r tradeRec
+			if err := tRows.Scan(&r.id, &r.symbol, &r.action, &r.shares, &r.price, &r.signalID, &r.ts); err == nil {
+				r.symbol = strings.ToUpper(strings.TrimSpace(r.symbol))
+				r.action = strings.ToUpper(strings.TrimSpace(r.action))
+				r.signalID = strings.TrimSpace(r.signalID)
+				allTrades = append(allTrades, r)
 			}
 		}
-		sRows.Close()
+		tRows.Close()
 
-		for _, sr := range sells {
-			var buyPrice float64
-			err := tx.QueryRowContext(ctx, `
-				SELECT price FROM paper_trades
-				WHERE symbol = ? AND action = 'BUY' AND id < ?
-				ORDER BY id DESC LIMIT 1;
-			`, sr.symbol, sr.id).Scan(&buyPrice)
-			if err == nil && buyPrice > 0 {
-				rpl := sr.shares * (sr.price - buyPrice)
-				_, _ = tx.ExecContext(ctx, `UPDATE paper_trades SET realized_pl = ? WHERE id = ?;`, rpl, sr.id)
+		sort.Slice(allTrades, func(i, j int) bool {
+			if allTrades[i].ts.Equal(allTrades[j].ts) {
+				return allTrades[i].id < allTrades[j].id
+			}
+			return allTrades[i].ts.Before(allTrades[j].ts)
+		})
+
+		lastBuyPriceBySym := make(map[string]float64)
+		for _, tr := range allTrades {
+			if strings.HasPrefix(tr.signalID, "sig-test-") || canceledBuys[tr.signalID] {
+				continue
+			}
+			if tr.action == "BUY" && tr.price > 0 {
+				lastBuyPriceBySym[tr.symbol] = tr.price
+			} else if tr.action == "SELL" {
+				if buyPrice, ok := lastBuyPriceBySym[tr.symbol]; ok && buyPrice > 0 {
+					rpl := tr.shares * (tr.price - buyPrice)
+					_, _ = tx.ExecContext(ctx, `UPDATE paper_trades SET realized_pl = ? WHERE id = ?;`, rpl, tr.id)
+				}
 			}
 		}
 	}

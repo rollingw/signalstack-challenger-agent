@@ -25,9 +25,6 @@ var canceledChallengerSignalIDs = map[string]bool{
 	"sig-buy-LABD-202610281500-250":    true,
 	"sig-buy-SPXS-202610281500-100":    true,
 	"sig-buy-TZA-202610281500-50":      true,
-	"sig-exit-ch-TZA-202610291100-55":  true,
-	"sig-buy-TZA-202610291100-55":      true,
-	"sig-buy-ch-TZA-202610291100-55":   true,
 }
 
 func isCanceledOrTestSignal(sigID string) bool {
