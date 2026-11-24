@@ -295,3 +295,72 @@ func TestReconcilePartialShareFillUpdatesJournalAndTrades(t *testing.T) {
 	}
 }
 
+func TestGetAccountUsesLastEquityForTrueDayPL(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test_last_equity.db")
+
+	j, err := NewSQLiteJournal(dbPath, 100000.0, 2.0, "2026-10-20")
+	if err != nil {
+		t.Fatalf("failed to create sqlite journal: %v", err)
+	}
+	defer j.Close()
+
+	// Reproduce 2026-11-23:
+	// - Prior close equity (Fri 11/20): $97,807.76
+	// - 3 multi-day losers stopped out Monday for -$1,253.83 total realized loss
+	//   (even though they bounced +$497.73 vs Friday close before exiting)
+	// - 4 held positions gained +$973.75 vs Friday close, ending at $99,279.24 equity
+	// True Day Equity P/L = $99,279.24 - $97,807.76 = +$1,471.48 (NOT -$280.08!)
+	prevSession := getPrevTradingCloseCST().Add(-48 * time.Hour)
+	_, err = j.db.Exec(`
+		INSERT INTO paper_positions (symbol, shares, avg_entry_price, cost_basis, current_price, prev_close, unrealized_pl, opened_at, updated_at)
+		VALUES
+			('FAS',  13, 181.15,   2354.95, 145.62, 145.62, -461.89, ?, ?),
+			('JNUG', 21, 109.6529, 2302.71,  71.20,  71.20, -807.51, ?, ?),
+			('TNA',  41,  55.64,   2281.24,  43.88,  43.88, -482.16, ?, ?);
+	`, prevSession, prevSession, prevSession, prevSession, prevSession, prevSession)
+	if err != nil {
+		t.Fatalf("failed to seed prior positions: %v", err)
+	}
+
+	if _, err := j.ApplySell(ctx, "FAS", 13, 154.86, "sig-exit-fas"); err != nil {
+		t.Fatalf("sell FAS failed: %v", err)
+	}
+	if _, err := j.ApplySell(ctx, "JNUG", 21, 81.28, "sig-exit-jnug"); err != nil {
+		t.Fatalf("sell JNUG failed: %v", err)
+	}
+	if _, err := j.ApplySell(ctx, "TNA", 41, 47.927073, "sig-exit-tna"); err != nil {
+		t.Fatalf("sell TNA failed: %v", err)
+	}
+
+	items := []*broker.ReconcilePositionItem{
+		{Symbol: "ERX", Shares: 25, AvgEntryPrice: 98.55, CurrentPrice: 92.92, PrevClose: 95.22, CostBasis: 2463.75},
+		{Symbol: "LABU", Shares: 11, AvgEntryPrice: 217.47, CurrentPrice: 197.45, PrevClose: 172.00, CostBasis: 2392.17},
+		{Symbol: "SPXL", Shares: 10, AvgEntryPrice: 239.633, CurrentPrice: 229.06, PrevClose: 201.97, CostBasis: 2396.33},
+		{Symbol: "TECL", Shares: 20, AvgEntryPrice: 121.96, CurrentPrice: 117.01, PrevClose: 92.99, CostBasis: 2439.20},
+	}
+	if err := j.ReconcilePositions(ctx, items, nil, 90153.49, true); err != nil {
+		t.Fatalf("ReconcilePositions failed: %v", err)
+	}
+	if err := j.SetLastEquity(ctx, 97807.76); err != nil {
+		t.Fatalf("SetLastEquity failed: %v", err)
+	}
+
+	acct, err := j.GetAccount(ctx)
+	if err != nil {
+		t.Fatalf("GetAccount failed: %v", err)
+	}
+	if acct.LastEquity != 97807.76 {
+		t.Errorf("expected LastEquity 97807.76, got %f", acct.LastEquity)
+	}
+	expectedDayEquityPL := 99279.24 - 97807.76 // +1471.48
+	if acct.DayPL < expectedDayEquityPL-0.05 || acct.DayPL > expectedDayEquityPL+0.05 {
+		t.Errorf("expected true DayPL ~+1471.48, got %f", acct.DayPL)
+	}
+	expectedDayRealizedPL := -1253.83
+	if acct.DayRealizedPL < expectedDayRealizedPL-0.05 || acct.DayRealizedPL > expectedDayRealizedPL+0.05 {
+		t.Errorf("expected DayRealizedPL ~-1253.83, got %f", acct.DayRealizedPL)
+	}
+}
+
+

@@ -176,8 +176,9 @@ func NewSQLiteJournal(dbPath string, initialCapital float64, marginMultiplier fl
 		return nil, fmt.Errorf("failed to initialize sqlite schema: %w", err)
 	}
 
-	// Migration: ensure prev_close column exists on paper_positions
+	// Migration: ensure prev_close column exists on paper_positions and last_equity on paper_account
 	_, _ = db.Exec("ALTER TABLE paper_positions ADD COLUMN prev_close REAL DEFAULT 0;")
+	_, _ = db.Exec("ALTER TABLE paper_account ADD COLUMN last_equity REAL DEFAULT 0;")
 
 	// Initialize paper account if not already initialized
 	var count int
@@ -348,13 +349,31 @@ func (s *SQLiteJournal) GetRecentExecutions(ctx context.Context, limit int) ([]*
 	return records, nil
 }
 
+// SetLastEquity persists the authoritative prior-session closing equity (e.g. Alpaca account.last_equity)
+// so GetAccount computes true single-day equity change (equity - last_equity) without mixing
+// multi-day realized P&L from closed trades with single-day MTM on open positions.
+func (s *SQLiteJournal) SetLastEquity(ctx context.Context, lastEquity float64) error {
+	if lastEquity <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE paper_account
+		SET last_equity = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1;
+	`, lastEquity)
+	if err != nil {
+		return fmt.Errorf("failed to update paper account last_equity: %w", err)
+	}
+	return nil
+}
+
 // GetAccount computes current paper account cash, equity, buying power, and P&L.
 func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error) {
-	var currentCash, initialCash, marginMult float64
+	var currentCash, initialCash, marginMult, lastEquity float64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT current_cash, initial_cash, margin_multiplier
+		SELECT current_cash, initial_cash, margin_multiplier, COALESCE(last_equity, 0)
 		FROM paper_account WHERE id = 1;
-	`).Scan(&currentCash, &initialCash, &marginMult)
+	`).Scan(&currentCash, &initialCash, &marginMult, &lastEquity)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read paper account: %w", err)
 	}
@@ -376,7 +395,7 @@ func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error)
 
 	prevTradingClose := getPrevTradingCloseCST()
 
-	var totalMarketVal, totalCostBasis, totalDayPL float64
+	var totalMarketVal, totalCostBasis, openPositionsDayPL float64
 	for rows.Next() {
 		var sym string
 		var shares, avgEntry, costBasis, currPrice, prevClose, unPL float64
@@ -394,14 +413,28 @@ func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error)
 				baseline = avgEntry
 			}
 			if baseline > 0 {
-				totalDayPL += shares * (currPrice - baseline)
+				openPositionsDayPL += shares * (currPrice - baseline)
 			}
 		}
 	}
 
-	// Add realized P&L from trades closed today (action = 'SELL' on or after startOfToday)
+	// Build canceled signal_id set so canceled orders never distort today's realized P&L
+	canceledSigs := make(map[string]bool)
+	cRows, cErr := s.db.QueryContext(ctx, `SELECT signal_id FROM execution_journal WHERE LOWER(status) = 'canceled';`)
+	if cErr == nil {
+		defer cRows.Close()
+		for cRows.Next() {
+			var cs string
+			if err := cRows.Scan(&cs); err == nil && cs != "" {
+				canceledSigs[strings.TrimSpace(cs)] = true
+			}
+		}
+	}
+
+	// Sum realized P&L from valid trades closed today (action = 'SELL' on or after startOfToday)
+	var dayRealizedPL float64
 	tradeRows, err := s.db.QueryContext(ctx, `
-		SELECT realized_pl, timestamp
+		SELECT realized_pl, COALESCE(signal_id, ''), timestamp
 		FROM paper_trades
 		WHERE action = 'SELL';
 	`)
@@ -409,10 +442,15 @@ func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error)
 		defer tradeRows.Close()
 		for tradeRows.Next() {
 			var rpl float64
+			var sigID string
 			var tradeTime time.Time
-			if err := tradeRows.Scan(&rpl, &tradeTime); err == nil {
+			if err := tradeRows.Scan(&rpl, &sigID, &tradeTime); err == nil {
+				sigTrim := strings.TrimSpace(sigID)
+				if canceledSigs[sigTrim] || strings.HasPrefix(sigTrim, "sig-test-") {
+					continue
+				}
 				if !tradeTime.Before(startOfToday) {
-					totalDayPL += rpl
+					dayRealizedPL += rpl
 				}
 			}
 		}
@@ -424,6 +462,14 @@ func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error)
 	buyingPower := currentCash * marginMult
 	if buyingPower < 0 {
 		buyingPower = 0
+	}
+
+	// Authoritative true daily equity change:
+	// When last_equity (prior RTH close equity from Alpaca) is available, DayPL = equity - last_equity.
+	// This avoids conflating multi-day realized P&L on closed legs with single-day MTM on open legs.
+	totalDayPL := openPositionsDayPL + dayRealizedPL
+	if lastEquity > 0 {
+		totalDayPL = equity - lastEquity
 	}
 
 	acctID := s.accountID
@@ -449,10 +495,12 @@ func (s *SQLiteJournal) GetAccount(ctx context.Context) (*broker.Account, error)
 		Cash:           currentCash,
 		BuyingPower:    buyingPower,
 		Equity:         equity,
+		LastEquity:     lastEquity,
 		PortfolioValue: totalMarketVal,
 		RealizedPL:     realizedPL,
 		UnrealizedPL:   totalUnrealizedPL,
 		DayPL:          totalDayPL,
+		DayRealizedPL:  dayRealizedPL,
 		TradingBlocked: false,
 	}, nil
 }

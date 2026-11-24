@@ -21,6 +21,7 @@ type JournalProvider interface {
 	ApplySell(ctx context.Context, symbol string, shares float64, price float64, signalID string) (float64, error)
 	UpdateMarketPrice(ctx context.Context, symbol string, price float64, prevClose float64) error
 	ReconcilePositions(ctx context.Context, positions []*ReconcilePositionItem, orders []*ReconcileOrderFillItem, cash float64, replace bool) error
+	SetLastEquity(ctx context.Context, lastEquity float64) error
 }
 
 type SignalStackBroker struct {
@@ -113,6 +114,13 @@ func (b *SignalStackBroker) ReconcilePositions(ctx context.Context, positions []
 		return fmt.Errorf("journal provider not configured")
 	}
 	return b.journal.ReconcilePositions(ctx, positions, orders, cash, replace)
+}
+
+func (b *SignalStackBroker) SetLastEquity(ctx context.Context, lastEquity float64) error {
+	if b.journal == nil {
+		return fmt.Errorf("journal provider not configured")
+	}
+	return b.journal.SetLastEquity(ctx, lastEquity)
 }
 
 // signalStackWebhookPayload defines the JSON schema sent to SignalStack alert webhook URLs.

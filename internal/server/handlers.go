@@ -1239,12 +1239,13 @@ func (s *Server) renderDashboardHTML(
 		acctNum = "SS-CHALLENGER-MAIN"
 	}
 	acctStatus := "ACTIVE"
-	var buyingPowerStr, cashStr, equityStr, plStr, dayPLStr string
+	var buyingPowerStr, cashStr, equityStr, plStr, dayPLStr, dayRealizedStr string
 	var realizedStr, unrealizedStr string
 	realizedColor := "#94a3b8"
 	realizedClass := ""
 	unrealizedColor := "#94a3b8"
 	dayPLClass := ""
+	dayRealizedColor := "#94a3b8"
 	plClass := ""
 	if acct != nil {
 		acctNum = acct.AccountNumber
@@ -1292,6 +1293,17 @@ func (s *Server) renderDashboardHTML(
 			dayPLStr = "$0.00"
 			dayPLClass = ""
 		}
+
+		if acct.DayRealizedPL > 0 {
+			dayRealizedStr = "+" + formatCurrency(acct.DayRealizedPL)
+			dayRealizedColor = "#34d399"
+		} else if acct.DayRealizedPL < 0 {
+			dayRealizedStr = formatCurrency(acct.DayRealizedPL)
+			dayRealizedColor = "#f87171"
+		} else {
+			dayRealizedStr = "$0.00"
+			dayRealizedColor = "#94a3b8"
+		}
 	} else {
 		buyingPowerStr = "$0.00"
 		cashStr = "$0.00"
@@ -1300,6 +1312,7 @@ func (s *Server) renderDashboardHTML(
 		realizedStr = "$0.00"
 		unrealizedStr = "$0.00"
 		dayPLStr = "$0.00"
+		dayRealizedStr = "$0.00"
 	}
 
 	closedWins := 0
@@ -1773,10 +1786,10 @@ func (s *Server) renderDashboardHTML(
 				<div class="card-value">%s</div>
 			</div>
 			<div class="card">
-				<div class="card-title">Today's Day P&amp;L</div>
+				<div class="card-title">Today's Equity P&amp;L</div>
 				<div class="card-value %s">%s</div>
 				<div style="font-size: 11px; color: #94a3b8; margin-top: 5px;">
-					Today's closed fills + %d open holding(s) MTM
+					Today Realized: <span style="color: %s; font-weight: 700;">%s</span> &bull; %d open holding(s)
 				</div>
 			</div>
 			<div class="card">
@@ -1902,7 +1915,7 @@ func (s *Server) renderDashboardHTML(
 		s.broker.Name(), webhookColor, webhookStatus, lastUpdatedStr, refreshStatusHTML,
 		html.EscapeString(s.dashboardExpectedUser()),
 		acctNum, acctStatus, buyingPowerStr, cashStr, equityStr,
-		dayPLClass, dayPLStr, len(positions),
+		dayPLClass, dayPLStr, dayRealizedColor, dayRealizedStr, len(positions),
 		realizedClass, realizedStr, realizedColor, winRateStr,
 		plClass, plStr, realizedColor, realizedStr, unrealizedColor, unrealizedStr,
 		len(positions), lastUpdatedStr, posRowsHTML,
@@ -2091,10 +2104,11 @@ func (s *Server) handlePriceUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReconcilePositions(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Positions []*broker.ReconcilePositionItem  `json:"positions"`
-		Orders    []*broker.ReconcileOrderFillItem `json:"orders,omitempty"`
-		Cash      float64                         `json:"cash,omitempty"`
-		Replace   bool                            `json:"replace,omitempty"`
+		Positions  []*broker.ReconcilePositionItem  `json:"positions"`
+		Orders     []*broker.ReconcileOrderFillItem `json:"orders,omitempty"`
+		Cash       float64                          `json:"cash,omitempty"`
+		LastEquity float64                          `json:"last_equity,omitempty"`
+		Replace    bool                             `json:"replace,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -2110,6 +2124,9 @@ func (s *Server) handleReconcilePositions(w http.ResponseWriter, r *http.Request
 			"message": err.Error(),
 		})
 		return
+	}
+	if req.LastEquity > 0 {
+		_ = s.broker.SetLastEquity(r.Context(), req.LastEquity)
 	}
 
 	positions, _ := s.broker.GetAllPositions(r.Context())

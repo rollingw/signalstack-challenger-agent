@@ -14,10 +14,12 @@ type Account struct {
 	Cash           float64 `json:"cash"`
 	BuyingPower    float64 `json:"buying_power"`
 	Equity         float64 `json:"equity"`
+	LastEquity     float64 `json:"last_equity,omitempty"`
 	PortfolioValue float64 `json:"portfolio_value"`
 	RealizedPL     float64 `json:"realized_pl"`
 	UnrealizedPL   float64 `json:"unrealized_pl"`
 	DayPL          float64 `json:"day_pl"`
+	DayRealizedPL  float64 `json:"day_realized_pl"`
 	TradingBlocked bool    `json:"trading_blocked"`
 }
 
@@ -100,5 +102,6 @@ type Broker interface {
 	GetOrder(ctx context.Context, orderID string) (*OrderResponse, error)
 	UpdateMarketPrice(ctx context.Context, symbol string, price float64, prevClose float64) error
 	ReconcilePositions(ctx context.Context, positions []*ReconcilePositionItem, orders []*ReconcileOrderFillItem, cash float64, replace bool) error
+	SetLastEquity(ctx context.Context, lastEquity float64) error
 }
 
